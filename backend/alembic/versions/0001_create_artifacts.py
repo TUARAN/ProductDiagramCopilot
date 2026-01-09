@@ -21,8 +21,8 @@ def upgrade() -> None:
     op.create_table(
         "artifacts",
         sa.Column("id", sa.String(length=36), primary_key=True),
-        sa.Column("kind", sa.String(length=32), nullable=False, index=True),
-        sa.Column("status", sa.String(length=16), nullable=False, server_default="created", index=True),
+        sa.Column("kind", sa.String(length=32), nullable=False),
+        sa.Column("status", sa.String(length=16), nullable=False, server_default="created"),
         sa.Column("request", sa.JSON(), nullable=False, server_default=sa.text("'{}'::json")),
         sa.Column("spec", sa.JSON(), nullable=True),
         sa.Column("mermaid", sa.Text(), nullable=True),
