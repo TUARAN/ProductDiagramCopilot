@@ -540,7 +540,7 @@ async function loadArtifact(id: string) {
                     生成
                   </el-button>
                   <div v-if="diagramLocalTimeSec !== null" class="mt" style="opacity: 0.85">
-                    本地生成时间：{{ diagramLocalTimeSec.toFixed(2) }} 秒
+                    本次生成时间：{{ diagramLocalTimeSec.toFixed(2) }} 秒
                   </div>
                   <el-alert v-if="diagramError" type="error" :title="diagramError" show-icon class="mt" />
                 </el-form>
@@ -734,10 +734,90 @@ async function loadArtifact(id: string) {
   border-bottom: 1px solid var(--el-border-color-lighter);
   background: var(--el-bg-color);
   box-shadow: var(--el-box-shadow-lighter);
+  position: relative;
+  overflow: hidden;
   display: flex;
   align-items: center;
   justify-content: space-between;
   gap: 16px;
+}
+
+.header::before {
+  content: '';
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  background:
+    repeating-linear-gradient(
+      135deg,
+      transparent 0,
+      transparent 14px,
+      color-mix(in srgb, var(--el-color-primary) 18%, transparent) 15px,
+      transparent 22px
+    ),
+    linear-gradient(
+      90deg,
+      transparent 0,
+      color-mix(in srgb, var(--el-border-color-lighter) 55%, transparent) 45%,
+      transparent 70%
+    );
+  opacity: 0.55;
+  transform: translateZ(0);
+  animation: headerTechLines 14s linear infinite;
+  mask-image: linear-gradient(90deg, transparent 0, #000 18%, #000 82%, transparent 100%);
+}
+
+.header::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  background:
+    radial-gradient(
+      circle at 12% 40%,
+      color-mix(in srgb, var(--el-color-primary) 28%, transparent) 0 1px,
+      transparent 2px
+    ),
+    radial-gradient(
+      circle at 72% 30%,
+      color-mix(in srgb, var(--el-color-success) 20%, transparent) 0 1px,
+      transparent 2px
+    ),
+    radial-gradient(
+      circle at 42% 78%,
+      color-mix(in srgb, var(--el-border-color-lighter) 70%, transparent) 0 1px,
+      transparent 2px
+    );
+  background-size: 280px 140px;
+  opacity: 0.35;
+  transform: translateZ(0);
+  animation: headerParticles 22s linear infinite;
+  mask-image: linear-gradient(90deg, transparent 0, #000 10%, #000 90%, transparent 100%);
+}
+
+@keyframes headerTechLines {
+  from {
+    background-position: 0 0, 0 0;
+  }
+  to {
+    background-position: 240px 0, -120px 0;
+  }
+}
+
+@keyframes headerParticles {
+  from {
+    background-position: 0 0;
+  }
+  to {
+    background-position: -280px 0;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .header::before,
+  .header::after {
+    animation: none;
+  }
 }
 
 .brand {
