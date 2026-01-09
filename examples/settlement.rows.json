@@ -1,0 +1,9 @@
+{
+  "month": "2026-01",
+  "rows": [
+    {"amount": 1000, "status": "success", "channel": "bank"},
+    {"amount": 800, "status": "success", "channel": "wallet"},
+    {"amount": 120, "status": "failed", "channel": "wallet"},
+    {"amount": 300, "status": "pending", "channel": "bank"}
+  ]
+}
