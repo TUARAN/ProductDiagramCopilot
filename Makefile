@@ -29,7 +29,7 @@ backend: install-backend
 	@source .venv/bin/activate && python pdc.py api --reload
 
 backend-pg: install-backend
-	./scripts/dev-backend-pg.sh
+	bash ./scripts/dev-backend-pg.sh
 
 migrate: install-backend
 	@source .venv/bin/activate && python pdc.py migrate
@@ -47,7 +47,7 @@ backend-script:
 	./scripts/dev-backend.sh
 
 backend-pg-script:
-	./scripts/dev-backend-pg.sh
+	bash ./scripts/dev-backend-pg.sh
 
 frontend-script:
 	./scripts/dev-frontend.sh
