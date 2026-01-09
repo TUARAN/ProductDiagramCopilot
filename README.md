@@ -150,6 +150,11 @@ product-diagram-copilot/
 
 `docker compose up -d`
 
+> 注意：为了避免与本机已有 Postgres 冲突，项目默认将 **宿主机 5433** 映射到容器内 **5432**。
+>
+> - 默认连接串：`postgresql+psycopg://pdc:pdc@localhost:5433/pdc`
+> - 如需改回宿主机 5432：`PDC_PG_PORT=5432 docker compose up -d postgres`，并同步修改 `.env` 中的 `DATABASE_URL`
+
 > 目前接口不强依赖数据库；但后续落地“产物存储/任务队列/元数据”时会用到。
 
 ### 2) 启动后端（FastAPI）
@@ -169,6 +174,14 @@ product-diagram-copilot/
 或使用脚本：
 
 `./scripts/dev-backend.sh`
+
+如果你希望“一条命令启动后端（自动启动 Docker Postgres + 等待就绪 + 迁移 + 热更新启动）”，使用：
+
+`make backend-pg`
+
+或直接运行：
+
+`./scripts/dev-backend-pg.sh`
 
 或使用 Python 入口（不需要手动设置 PYTHONPATH）：
 
