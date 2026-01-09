@@ -66,6 +66,17 @@ export interface LlmPingResponse {
   error?: string
 }
 
+export interface DbPingResponse {
+  ok: boolean
+  dialect: string
+  driver?: string
+  host?: string
+  port?: number
+  database?: string
+  latency_ms?: number
+  error?: string
+}
+
 async function http<T>(path: string, init: RequestInit): Promise<T> {
   const res = await fetch(path, {
     ...init,
@@ -138,6 +149,12 @@ export function getArtifact(artifactId: string) {
 
 export function llmPing() {
   return http<LlmPingResponse>('/api/llm/ping', {
+    method: 'GET',
+  })
+}
+
+export function dbPing() {
+  return http<DbPingResponse>('/api/db/ping', {
     method: 'GET',
   })
 }

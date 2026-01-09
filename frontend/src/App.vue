@@ -3,6 +3,7 @@ import { computed, onMounted, ref, watch } from 'vue'
 import * as echarts from 'echarts'
 
 import {
+  dbPing,
   generateDiagram,
   generateIntegration,
   getArtifact,
@@ -14,6 +15,7 @@ import {
   submitIntegrationTask,
   type DiagramType,
   type ArtifactOut,
+  type DbPingResponse,
   type LlmPingResponse,
 } from './lib/api'
 import { renderMermaid } from './lib/mermaid'
@@ -25,6 +27,11 @@ const llmLoading = ref(false)
 const llmError = ref('')
 const llm = ref<LlmPingResponse | null>(null)
 
+// DB status (PostgreSQL connectivity)
+const dbLoading = ref(false)
+const dbError = ref('')
+const db = ref<DbPingResponse | null>(null)
+
 async function refreshLlm() {
   llmLoading.value = true
   llmError.value = ''
@@ -35,6 +42,19 @@ async function refreshLlm() {
     llmError.value = e instanceof Error ? e.message : String(e)
   } finally {
     llmLoading.value = false
+  }
+}
+
+async function refreshDb() {
+  dbLoading.value = true
+  dbError.value = ''
+  try {
+    db.value = await dbPing()
+  } catch (e) {
+    db.value = null
+    dbError.value = e instanceof Error ? e.message : String(e)
+  } finally {
+    dbLoading.value = false
   }
 }
 
@@ -276,6 +296,7 @@ watch(metricsRows, () => updateChart())
 onMounted(() => {
   updateChart()
   refreshLlm()
+  refreshDb()
 })
 
 // Artifacts
@@ -319,12 +340,18 @@ async function loadArtifact(id: string) {
         </div>
 
         <div class="headerRight">
+          <el-tag size="small" :type="db?.ok ? 'success' : 'warning'">
+            DB: {{ db?.ok ? 'ok' : 'down' }}
+          </el-tag>
+          <el-tag size="small" type="info">DB Latency: {{ db?.latency_ms ?? '-' }}ms</el-tag>
           <el-tag size="small" :type="llm?.ok ? 'success' : 'warning'">
             LLM: {{ llm?.mode || 'unknown' }}
           </el-tag>
           <el-tag size="small" type="info">Model: {{ llm?.model || '-' }}</el-tag>
           <el-tag size="small" type="info">Latency: {{ llm?.latency_ms ?? '-' }}ms</el-tag>
-          <el-button size="small" :loading="llmLoading" @click="refreshLlm">刷新</el-button>
+          <el-button size="small" :loading="llmLoading || dbLoading" @click="() => { refreshDb(); refreshLlm(); }">
+            刷新
+          </el-button>
         </div>
       </el-header>
 
@@ -332,8 +359,10 @@ async function loadArtifact(id: string) {
         <el-card class="mb panel" shadow="never">
           <template #header>
             <div style="display: flex; align-items: center; justify-content: space-between">
-              <span>LLM 调用状态 & 可选组件</span>
-              <el-button size="small" :loading="llmLoading" @click="refreshLlm">刷新</el-button>
+              <span>LLM / DB 状态 & 可选组件</span>
+              <el-button size="small" :loading="llmLoading || dbLoading" @click="() => { refreshDb(); refreshLlm(); }">
+                刷新
+              </el-button>
             </div>
           </template>
 
@@ -345,9 +374,23 @@ async function loadArtifact(id: string) {
             class="mb"
           />
 
+          <el-alert v-if="dbError" type="error" :title="dbError" show-icon class="mb" />
+
           <el-row :gutter="16">
             <el-col :span="10">
               <el-descriptions :column="1" border>
+                <el-descriptions-item label="数据库">
+                  <el-tag v-if="db" :type="db.ok ? 'success' : 'danger'">{{ db.ok ? 'OK' : 'DOWN' }}</el-tag>
+                  <span v-else>-</span>
+                </el-descriptions-item>
+                <el-descriptions-item label="DB 连接">
+                  <span v-if="db">{{ db.dialect }}://{{ db.host || '-' }}:{{ db.port ?? '-' }}/{{ db.database || '-' }}</span>
+                  <span v-else>-</span>
+                </el-descriptions-item>
+                <el-descriptions-item label="DB 延迟">
+                  <span v-if="db">{{ db.latency_ms ?? '-' }} ms</span>
+                  <span v-else>-</span>
+                </el-descriptions-item>
                 <el-descriptions-item label="当前模式">
                   <el-tag v-if="llm" :type="llm.ok ? 'success' : 'danger'">{{ llm.mode }}</el-tag>
                   <span v-else>-</span>

@@ -1,6 +1,6 @@
 from fastapi import APIRouter
 
-from app.api.routes import artifacts, diagram, integration, llm, settlement, tasks
+from app.api.routes import artifacts, db, diagram, integration, llm, settlement, tasks
 
 api_router = APIRouter()
 
@@ -10,3 +10,4 @@ api_router.include_router(settlement.router, prefix="/settlement", tags=["settle
 api_router.include_router(tasks.router, prefix="/tasks", tags=["tasks"])
 api_router.include_router(artifacts.router, prefix="/artifacts", tags=["artifacts"])
 api_router.include_router(llm.router, prefix="/llm", tags=["llm"])
+api_router.include_router(db.router, prefix="/db", tags=["db"])
