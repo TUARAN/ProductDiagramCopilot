@@ -3,6 +3,7 @@ import { computed, onMounted, ref, watch } from 'vue'
 import * as echarts from 'echarts'
 
 import {
+  dbPing,
   generateDiagram,
   generateIntegration,
   getArtifact,
@@ -14,16 +15,61 @@ import {
   submitIntegrationTask,
   type DiagramType,
   type ArtifactOut,
+  type DbPingResponse,
   type LlmPingResponse,
 } from './lib/api'
 import { renderMermaid } from './lib/mermaid'
 
 const activeTab = ref<'diagram' | 'integration' | 'settlement' | 'artifacts'>('diagram')
 
+const STORAGE_KEYS = {
+  statusPanelCollapsed: 'pdc:statusPanelCollapsed',
+} as const
+
+const statusPanelCollapsed = ref(false)
+
+function loadBoolFromStorage(key: string, fallback: boolean) {
+  try {
+    const raw = localStorage.getItem(key)
+    if (raw === null) return fallback
+    return raw === '1'
+  } catch {
+    return fallback
+  }
+}
+
+function saveBoolToStorage(key: string, value: boolean) {
+  try {
+    localStorage.setItem(key, value ? '1' : '0')
+  } catch {
+    // ignore
+  }
+}
+
 // LLM status (visualize where we call API / local model)
 const llmLoading = ref(false)
 const llmError = ref('')
 const llm = ref<LlmPingResponse | null>(null)
+
+// DB status (PostgreSQL connectivity)
+const dbLoading = ref(false)
+const dbError = ref('')
+const db = ref<DbPingResponse | null>(null)
+
+const isDevProxy = computed(() => {
+  const origin = window.location.origin
+  return origin.includes('localhost:5173') || origin.includes('127.0.0.1:5173')
+})
+
+const backendApiBase = computed(() => {
+  const origin = window.location.origin
+  const base = `${origin}/api`
+  return isDevProxy.value ? `${base}（dev 代理）` : base
+})
+
+const backendApiBaseReal = computed(() => {
+  return 'http://localhost:8000/api'
+})
 
 async function refreshLlm() {
   llmLoading.value = true
@@ -35,6 +81,19 @@ async function refreshLlm() {
     llmError.value = e instanceof Error ? e.message : String(e)
   } finally {
     llmLoading.value = false
+  }
+}
+
+async function refreshDb() {
+  dbLoading.value = true
+  dbError.value = ''
+  try {
+    db.value = await dbPing()
+  } catch (e) {
+    db.value = null
+    dbError.value = e instanceof Error ? e.message : String(e)
+  } finally {
+    dbLoading.value = false
   }
 }
 
@@ -79,30 +138,16 @@ const featureMatrix = computed(() => {
   ]
 })
 
-const llmSteps = computed(() => {
-  const mode = llm.value?.mode || 'unknown'
-  const provider = llm.value?.provider || 'provider'
-  const model = llm.value?.model
-  const baseUrl = llm.value?.base_url
+type StepItem = { title: string; description?: string }
 
-  const llmNode = model ? `${provider} (${model})` : provider
-  const upstream =
-    mode === 'openai_compat'
-      ? `外部 API: ${baseUrl || 'OPENAI_COMPAT_BASE_URL'}`
-      : mode === 'ollama'
-        ? `本地模型: ${baseUrl || 'OLLAMA_BASE_URL'}`
-        : mode === 'mock'
-          ? 'Mock（不出网）'
-          : '未识别'
-
+const llmSteps = computed<StepItem[]>(() => {
   return [
-    '前端点击生成',
-    '后端 API',
-    llmNode,
-    upstream,
-    '结构化 Spec JSON',
-    'Mermaid 渲染',
-    '前端 SVG',
+    { title: '前端点击生成' },
+    { title: '后端 API' },
+    { title: 'LLM' },
+    { title: '结构化 Spec JSON' },
+    { title: 'Mermaid 渲染' },
+    { title: '前端 SVG' },
   ]
 })
 
@@ -275,8 +320,12 @@ watch(metricsRows, () => updateChart())
 
 onMounted(() => {
   updateChart()
+  statusPanelCollapsed.value = loadBoolFromStorage(STORAGE_KEYS.statusPanelCollapsed, false)
   refreshLlm()
+  refreshDb()
 })
+
+watch(statusPanelCollapsed, (v) => saveBoolToStorage(STORAGE_KEYS.statusPanelCollapsed, v))
 
 // Artifacts
 const artifactsLoading = ref(false)
@@ -319,12 +368,18 @@ async function loadArtifact(id: string) {
         </div>
 
         <div class="headerRight">
+          <el-tag size="small" :type="db?.ok ? 'success' : 'warning'">
+            DB: {{ db?.ok ? 'ok' : 'down' }}
+          </el-tag>
+          <el-tag size="small" type="info">DB Latency: {{ db?.latency_ms ?? '-' }}ms</el-tag>
           <el-tag size="small" :type="llm?.ok ? 'success' : 'warning'">
             LLM: {{ llm?.mode || 'unknown' }}
           </el-tag>
           <el-tag size="small" type="info">Model: {{ llm?.model || '-' }}</el-tag>
           <el-tag size="small" type="info">Latency: {{ llm?.latency_ms ?? '-' }}ms</el-tag>
-          <el-button size="small" :loading="llmLoading" @click="refreshLlm">刷新</el-button>
+          <el-button size="small" :loading="llmLoading || dbLoading" @click="() => { refreshDb(); refreshLlm(); }">
+            刷新
+          </el-button>
         </div>
       </el-header>
 
@@ -332,72 +387,120 @@ async function loadArtifact(id: string) {
         <el-card class="mb panel" shadow="never">
           <template #header>
             <div style="display: flex; align-items: center; justify-content: space-between">
-              <span>LLM 调用状态 & 可选组件</span>
-              <el-button size="small" :loading="llmLoading" @click="refreshLlm">刷新</el-button>
+              <span>LLM / DB 状态 & 可选组件</span>
+              <div style="display: flex; align-items: center; gap: 8px">
+                <el-button
+                  size="small"
+                  @click="() => { statusPanelCollapsed = !statusPanelCollapsed }"
+                >
+                  {{ statusPanelCollapsed ? '展开' : '折叠' }}
+                </el-button>
+                <el-button
+                  size="small"
+                  :loading="llmLoading || dbLoading"
+                  :disabled="statusPanelCollapsed"
+                  @click="() => { refreshDb(); refreshLlm(); }"
+                >
+                  刷新
+                </el-button>
+              </div>
             </div>
           </template>
 
-          <el-alert
-            v-if="llmError"
-            type="error"
-            :title="llmError"
-            show-icon
-            class="mb"
-          />
+          <div v-show="!statusPanelCollapsed">
+            <el-alert
+              v-if="llmError"
+              type="error"
+              :title="llmError"
+              show-icon
+              class="mb"
+            />
 
-          <el-row :gutter="16">
-            <el-col :span="10">
-              <el-descriptions :column="1" border>
-                <el-descriptions-item label="当前模式">
-                  <el-tag v-if="llm" :type="llm.ok ? 'success' : 'danger'">{{ llm.mode }}</el-tag>
-                  <span v-else>-</span>
-                </el-descriptions-item>
-                <el-descriptions-item label="Provider">
-                  <span v-if="llm">{{ llm.provider }}</span>
-                  <span v-else>-</span>
-                </el-descriptions-item>
-                <el-descriptions-item label="Model">
-                  <span v-if="llm">{{ llm.model || '-' }}</span>
-                  <span v-else>-</span>
-                </el-descriptions-item>
-                <el-descriptions-item label="Base URL">
-                  <span v-if="llm">{{ llm.base_url || '-' }}</span>
-                  <span v-else>-</span>
-                </el-descriptions-item>
-                <el-descriptions-item label="延迟">
-                  <span v-if="llm">{{ llm.latency_ms ?? '-' }} ms</span>
-                  <span v-else>-</span>
-                </el-descriptions-item>
-              </el-descriptions>
+            <el-alert v-if="dbError" type="error" :title="dbError" show-icon class="mb" />
 
-              <el-alert
-                class="mt"
-                type="info"
-                title="如何切换到本地模型（Ollama）"
-                :closable="false"
-                show-icon
-              >
-                <div>
-                  1) 安装并启动 Ollama（默认地址 http://localhost:11434）<br />
-                  2) 在 .env 中设置：LLM_MODE=ollama，OLLAMA_MODEL=qwen2.5:7b（或你的模型）<br />
-                  3) 重启后端，再点「刷新」即可看到模式变化
-                </div>
-              </el-alert>
-            </el-col>
+            <el-row :gutter="16">
+              <el-col :span="10">
+                <el-descriptions :column="1" border>
+                  <el-descriptions-item label="后端地址">
+                    <div>{{ backendApiBase }}</div>
+                    <div v-if="isDevProxy" style="margin-top: 6px; opacity: 0.85">
+                      真实后端：{{ backendApiBaseReal }}
+                    </div>
+                  </el-descriptions-item>
+                  <el-descriptions-item label="数据库">
+                    <el-tag v-if="db" :type="db.ok ? 'success' : 'danger'">{{ db.ok ? 'OK' : 'DOWN' }}</el-tag>
+                    <span v-else>-</span>
+                  </el-descriptions-item>
+                  <el-descriptions-item label="DB 连接">
+                    <span v-if="db">{{ db.dialect }}://{{ db.host || '-' }}:{{ db.port ?? '-' }}/{{ db.database || '-' }}</span>
+                    <span v-else>-</span>
+                  </el-descriptions-item>
+                  <el-descriptions-item label="DB 延迟">
+                    <span v-if="db">{{ db.latency_ms ?? '-' }} ms</span>
+                    <span v-else>-</span>
+                  </el-descriptions-item>
+                  <el-descriptions-item label="当前模式">
+                    <el-tag v-if="llm" :type="llm.ok ? 'success' : 'danger'">{{ llm.mode }}</el-tag>
+                    <span v-else>-</span>
+                  </el-descriptions-item>
+                  <el-descriptions-item label="Provider">
+                    <span v-if="llm">{{ llm.provider }}</span>
+                    <span v-else>-</span>
+                  </el-descriptions-item>
+                  <el-descriptions-item label="Model">
+                    <span v-if="llm">{{ llm.model || '-' }}</span>
+                    <span v-else>-</span>
+                  </el-descriptions-item>
+                  <el-descriptions-item label="Base URL">
+                    <span v-if="llm">{{ llm.base_url || '-' }}</span>
+                    <span v-else>-</span>
+                  </el-descriptions-item>
+                  <el-descriptions-item label="延迟">
+                    <span v-if="llm">{{ llm.latency_ms ?? '-' }} ms</span>
+                    <span v-else>-</span>
+                  </el-descriptions-item>
+                </el-descriptions>
 
-            <el-col :span="14">
-              <el-steps :active="llmSteps.length" align-center finish-status="success" class="steps">
-                <el-step v-for="s in llmSteps" :key="s" :title="s" />
-              </el-steps>
+                <el-alert
+                  class="mt"
+                  type="info"
+                  title="如何切换到本地模型（Ollama）"
+                  :closable="false"
+                  show-icon
+                >
+                  <div>
+                    1) 安装并启动 Ollama（默认地址 http://localhost:11434）<br />
+                    2) 在 .env 中设置：LLM_MODE=ollama，OLLAMA_MODEL=qwen2.5:7b（或你的模型）<br />
+                    3) 重启后端，再点「刷新」即可看到模式变化
+                  </div>
+                </el-alert>
+              </el-col>
 
-              <el-table :data="featureMatrix" size="small" border style="width: 100%">
-                <el-table-column prop="feature" label="功能" width="170" />
-                <el-table-column prop="llm" label="调用大模型" width="90" />
-                <el-table-column prop="api" label="后端 API" />
-                <el-table-column prop="optional" label="可选依赖/组件" width="240" />
-              </el-table>
-            </el-col>
-          </el-row>
+              <el-col :span="14">
+                <el-steps
+                  :active="llmSteps.length + 1"
+                  align-center
+                  process-status="success"
+                  finish-status="success"
+                  class="steps"
+                >
+                  <el-step
+                    v-for="s in llmSteps"
+                    :key="`${s.title}::${s.description || ''}`"
+                    :title="s.title"
+                    :description="s.description"
+                  />
+                </el-steps>
+
+                <el-table :data="featureMatrix" size="small" border style="width: 100%">
+                  <el-table-column prop="feature" label="功能" width="170" />
+                  <el-table-column prop="llm" label="调用大模型" width="90" />
+                  <el-table-column prop="api" label="后端 API" />
+                  <el-table-column prop="optional" label="可选依赖/组件" width="240" />
+                </el-table>
+              </el-col>
+            </el-row>
+          </div>
         </el-card>
 
         <el-tabs v-model="activeTab" class="tabs">
@@ -569,6 +672,14 @@ async function loadArtifact(id: string) {
 </template>
 
 <style scoped>
+:global(html) {
+  scrollbar-gutter: stable;
+}
+
+:global(body) {
+  overflow-y: scroll;
+}
+
 .app {
   width: 100%;
   min-height: 100vh;
@@ -638,11 +749,13 @@ async function loadArtifact(id: string) {
 
 .main {
   padding: 16px;
-  max-width: 1280px;
-  margin: 0 auto;
+  width: 100%;
+  max-width: none;
+  margin: 0;
 }
 
 .panel {
+  width: 100%;
   border: 1px solid var(--el-border-color-lighter);
   background: color-mix(in srgb, var(--el-bg-color) 88%, transparent);
   backdrop-filter: blur(10px);
@@ -658,11 +771,61 @@ async function loadArtifact(id: string) {
 
 .steps {
   margin-bottom: 12px;
-  padding: 8px 8px 0;
+  padding: 8px 10px 6px;
   border: 1px solid var(--el-border-color-lighter);
   border-radius: var(--el-border-radius-base);
   background: var(--el-bg-color);
-  overflow-x: auto;
+  overflow: hidden;
+  flex-wrap: nowrap;
+  min-height: 64px;
+}
+
+.steps :deep(.el-step__title) {
+  font-size: 12px;
+  line-height: 1.25;
+  max-width: 180px;
+  white-space: normal;
+  overflow-wrap: anywhere;
+  word-break: break-word;
+  text-align: center;
+}
+
+.steps :deep(.el-step__description) {
+  font-size: 11px;
+  line-height: 1.25;
+  max-width: 180px;
+  white-space: normal;
+  overflow-wrap: anywhere;
+  word-break: break-word;
+  text-align: center;
+}
+
+.steps :deep(.el-step__head.is-success) {
+  color: var(--el-color-success);
+  border-color: var(--el-color-success);
+}
+
+.steps :deep(.el-step__head.is-process),
+.steps :deep(.el-step__head.is-wait) {
+  color: var(--el-color-success);
+  border-color: var(--el-color-success);
+}
+
+.steps :deep(.el-step__title.is-process),
+.steps :deep(.el-step__title.is-wait) {
+  color: var(--el-color-success);
+}
+
+.steps :deep(.el-step__icon) {
+  border-color: var(--el-color-success);
+}
+
+.steps :deep(.el-step__line) {
+  background-color: var(--el-color-success);
+}
+
+.steps :deep(.el-step__line-inner) {
+  border-color: var(--el-color-success);
 }
 
 .mermaid :deep(svg) {
