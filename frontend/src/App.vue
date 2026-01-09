@@ -67,6 +67,11 @@ const backendApiBase = computed(() => {
   return isDevProxy.value ? `${base}（dev 代理）` : base
 })
 
+const backendApiProxy = computed(() => {
+  const origin = window.location.origin
+  return `${origin}/api`
+})
+
 const backendApiBaseReal = computed(() => {
   return 'http://localhost:8000/api'
 })
@@ -175,6 +180,7 @@ const diagramSvg = ref('')
 const diagramLoading = ref(false)
 const diagramError = ref('')
 const diagramAsync = ref(true)
+const diagramLocalTimeSec = ref<number | null>(null)
 
 // Integration
 const integrationText = ref(
@@ -222,9 +228,11 @@ function onDownloadDiagramSvg() {
 }
 
 async function onGenerateDiagram() {
+  const startedAt = performance.now()
   diagramError.value = ''
   diagramSvg.value = ''
   diagramMermaid.value = ''
+  diagramLocalTimeSec.value = null
   diagramLoading.value = true
   try {
     const payload = {
@@ -245,6 +253,8 @@ async function onGenerateDiagram() {
       diagramMermaid.value = res.mermaid
       diagramSvg.value = await renderMermaid(`m-${Date.now()}`, res.mermaid)
     }
+
+    diagramLocalTimeSec.value = (performance.now() - startedAt) / 1000
   } catch (e) {
     diagramError.value = e instanceof Error ? e.message : String(e)
   } finally {
@@ -421,11 +431,16 @@ async function loadArtifact(id: string) {
             <el-row :gutter="16">
               <el-col :span="10">
                 <el-descriptions :column="1" border>
-                  <el-descriptions-item label="后端地址">
-                    <div>{{ backendApiBase }}</div>
-                    <div v-if="isDevProxy" style="margin-top: 6px; opacity: 0.85">
-                      真实后端：{{ backendApiBaseReal }}
-                    </div>
+                  <el-descriptions-item label="后端（FastAPI）">
+                    <template v-if="isDevProxy">
+                      <div>后端代理：{{ backendApiProxy }}</div>
+                      <div style="margin-top: 6px; opacity: 0.85">
+                        后端地址：{{ backendApiBaseReal }}
+                      </div>
+                    </template>
+                    <template v-else>
+                      <div>后端地址：{{ backendApiBase }}</div>
+                    </template>
                   </el-descriptions-item>
                   <el-descriptions-item label="数据库">
                     <el-tag v-if="db" :type="db.ok ? 'success' : 'danger'">{{ db.ok ? 'OK' : 'DOWN' }}</el-tag>
@@ -524,6 +539,9 @@ async function loadArtifact(id: string) {
                   <el-button type="primary" :loading="diagramLoading" @click="onGenerateDiagram">
                     生成
                   </el-button>
+                  <div v-if="diagramLocalTimeSec !== null" class="mt" style="opacity: 0.85">
+                    本地生成时间：{{ diagramLocalTimeSec.toFixed(2) }} 秒
+                  </div>
                   <el-alert v-if="diagramError" type="error" :title="diagramError" show-icon class="mt" />
                 </el-form>
               </el-col>

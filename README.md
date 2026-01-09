@@ -159,33 +159,19 @@ product-diagram-copilot/
 
 ### 2) 启动后端（FastAPI）
 
-在项目根目录：
-
-`python3 -m venv .venv`
-
-`source .venv/bin/activate`
-
-`pip install -U pip`
-
-`pip install -r backend/requirements.txt`
-
-`PYTHONPATH=backend uvicorn app.main:app --host 0.0.0.0 --port 8000`
-
-或使用脚本：
-
-`./scripts/dev-backend.sh`
-
-如果你希望“一条命令启动后端（自动启动 Docker Postgres + 等待就绪 + 迁移 + 热更新启动）”，使用：
+推荐（最省心）：
 
 `make backend-pg`
 
-或直接运行：
+说明：会自动启动 Docker Postgres + 等待就绪 + 迁移 + 启动后端（reload）。
 
-`./scripts/dev-backend-pg.sh`
+仅启动后端（不管数据库）：
 
-或使用 Python 入口（不需要手动设置 PYTHONPATH）：
+`make backend`
 
-`python run_backend.py`
+等价命令（不通过 Makefile）：
+
+`python pdc.py api --reload`
 
 健康检查：
 
@@ -246,33 +232,19 @@ product-diagram-copilot/
 
 启动 worker：
 
-`source .venv/bin/activate`
-
-`PYTHONPATH=backend celery -A app.jobs.celery_app.celery_app worker -l info`
-
-或使用脚本：
-
-`./scripts/dev-worker.sh`
-
-或使用 Python 入口：
-
-`python run_worker.py`
-
-也可以用 Makefile：
-
 `make worker`
+
+等价命令：
+
+`python pdc.py worker`
 
 ## 🗄️ 数据库迁移（Alembic）
 
-`./scripts/migrate.sh`
-
-或：
-
-`python run_migrate.py`
-
-或：
-
 `make migrate`
+
+等价命令：
+
+`python pdc.py migrate`
 
 ---
 
