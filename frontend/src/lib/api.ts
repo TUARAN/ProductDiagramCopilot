@@ -77,8 +77,18 @@ export interface DbPingResponse {
   error?: string
 }
 
+function isTauriRuntime(): boolean {
+  return typeof window !== 'undefined' && '__TAURI__' in (window as any)
+}
+
+function apiBase(): string {
+  // In normal web/dev, we rely on same-origin `/api` (Vite proxy in dev).
+  // In Tauri production, the origin is not the dev server, so use the local backend.
+  return isTauriRuntime() ? 'http://localhost:8000' : ''
+}
+
 async function http<T>(path: string, init: RequestInit): Promise<T> {
-  const res = await fetch(path, {
+  const res = await fetch(`${apiBase()}${path}`, {
     ...init,
     headers: {
       'content-type': 'application/json',

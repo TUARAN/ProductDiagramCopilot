@@ -195,6 +195,34 @@ product-diagram-copilot/
 
 `make frontend`
 
+---
+
+## 🖥️ 桌面版（Tauri）
+
+说明：桌面版复用当前前端界面；后端仍以本地 FastAPI 方式运行（默认 `http://localhost:8000`）。
+
+1) 启动后端（任选一种）：
+
+`make backend-pg`
+
+或：
+
+`make backend`
+
+2) 启动桌面端（开发模式）：
+
+`cd frontend`
+
+`npm run tauri:dev`
+
+3) 打包桌面端：
+
+`cd frontend`
+
+`npm run tauri:build`
+
+> 首次打包需要本机安装 Rust 工具链（`rustup`）以及对应平台的构建依赖（Tauri 会在报错信息里提示）。
+
 ### 4) 三个核心接口（已实现骨架）
 
 - `POST /api/diagram/generate`：生成 Diagram Spec + Mermaid

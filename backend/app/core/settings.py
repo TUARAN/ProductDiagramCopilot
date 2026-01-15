@@ -12,7 +12,13 @@ class Settings(BaseSettings):
 
     APP_NAME: str = "Product Diagram Copilot"
 
-    CORS_ALLOW_ORIGINS: list[str] = ["http://localhost:5173", "http://127.0.0.1:5173"]
+    CORS_ALLOW_ORIGINS: list[str] = [
+        "http://localhost:5173",
+        "http://127.0.0.1:5173",
+        "http://tauri.localhost",
+        "https://tauri.localhost",
+        "tauri://localhost",
+    ]
 
     DATABASE_URL: str = "postgresql+psycopg://pdc:pdc@localhost:5432/pdc"
 
