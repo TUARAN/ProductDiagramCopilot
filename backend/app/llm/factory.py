@@ -5,12 +5,7 @@ from app.llm.base import LLMProvider
 
 
 def get_provider() -> LLMProvider:
-    mode = (settings.LLM_MODE or "mock").lower()
-
-    if mode == "mock":
-        from app.llm.mock import provider
-
-        return provider()
+    mode = (settings.LLM_MODE or "ollama").lower()
 
     if mode == "openai_compat":
         from app.llm.openai_compat import provider
@@ -22,4 +17,4 @@ def get_provider() -> LLMProvider:
 
         return provider()
 
-    raise ValueError(f"Unsupported LLM_MODE: {settings.LLM_MODE}")
+    raise ValueError(f"Unsupported LLM_MODE: {settings.LLM_MODE}. Supported: ollama | openai_compat")

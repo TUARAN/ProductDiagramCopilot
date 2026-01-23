@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import io
+from pathlib import Path
 from typing import Optional
 
 from minio import Minio
@@ -33,6 +34,16 @@ def ensure_bucket() -> None:
 
 
 def put_text(object_key: str, text: str, content_type: str = "text/plain; charset=utf-8") -> None:
+    if (settings.STORAGE_MODE or "minio").lower() == "local":
+        base = settings.LOCAL_STORAGE_DIR
+        if not base:
+            raise RuntimeError("LOCAL_STORAGE_DIR is not set")
+        # Treat object_key like an S3 key; store under LOCAL_STORAGE_DIR.
+        target = Path(base) / object_key
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(text, encoding="utf-8")
+        return
+
     client = get_minio_client()
     ensure_bucket()
     data = text.encode("utf-8")

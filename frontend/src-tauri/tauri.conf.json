@@ -2,11 +2,11 @@
   "$schema": "https://schema.tauri.app/config/2",
   "productName": "ProductDiagramCopilot",
   "version": "0.1.0",
-  "identifier": "com.tauri.dev",
+  "identifier": "com.productdiagramcopilot.desktop",
   "build": {
     "frontendDist": "../dist",
     "devUrl": "http://localhost:5173",
-    "beforeDevCommand": "npm run dev",
+    "beforeDevCommand": "./scripts/tauri-dev.sh",
     "beforeBuildCommand": "npm run build"
   },
   "app": {
@@ -32,6 +32,13 @@
       "icons/128x128@2x.png",
       "icons/icon.icns",
       "icons/icon.ico"
+    ],
+    "resources": [
+      "resources/**/*"
+    ],
+    "externalBin": [
+      "binaries/ollama",
+      "binaries/pdc-backend"
     ]
   }
 }

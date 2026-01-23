@@ -2,3 +2,10 @@
 # will have compiled files and executables
 /target/
 /gen/schemas
+
+# Scheme A: bundled Ollama models (can be multi-GB)
+/resources/ollama_models/
+
+# Generated locally for packaging (can be large and third-party)
+/binaries/ollama-*
+/binaries/pdc-backend-*

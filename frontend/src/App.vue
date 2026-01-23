@@ -8,9 +8,11 @@ import {
   generateIntegration,
   getArtifact,
   getTaskStatus,
+  getLlmConfig,
   llmPing,
   listArtifacts,
   settlementMetrics,
+  setLlmConfig,
   submitDiagramTask,
   submitIntegrationTask,
   type DiagramType,
@@ -51,6 +53,19 @@ const llmLoading = ref(false)
 const llmError = ref('')
 const llm = ref<LlmPingResponse | null>(null)
 
+const llmConfigLoading = ref(false)
+const llmConfigError = ref('')
+const llmMode = ref<'ollama' | 'openai_compat'>('ollama')
+const ollamaBaseUrl = ref('http://localhost:11434')
+const ollamaModel = ref('llama3.2:1b')
+
+const ollamaPresetModels = ['llama3.2:1b', 'qwen3:4b']
+
+let llmModeAutoApplyEnabled = false
+let suppressLlmModeAutoApply = 0
+let pendingLlmMode: 'ollama' | 'openai_compat' | null = null
+let llmConfigApplyTimer: number | null = null
+
 // DB status (PostgreSQL connectivity)
 const dbLoading = ref(false)
 const dbError = ref('')
@@ -88,6 +103,102 @@ async function refreshLlm() {
     llmLoading.value = false
   }
 }
+
+async function refreshLlmConfig() {
+  llmConfigLoading.value = true
+  llmConfigError.value = ''
+  suppressLlmModeAutoApply += 1
+  try {
+    const cfg = await getLlmConfig()
+    // We only expose ollama / openai_compat in the UI.
+    // If backend returns an unexpected mode, treat it as ollama (local) to avoid a dead-end UI.
+    llmMode.value = cfg.mode === 'openai_compat' ? 'openai_compat' : 'ollama'
+
+    // Auto-fill ollama settings when backend is in ollama mode.
+    // (When in openai_compat, cfg.base_url refers to gateway URL and should not overwrite ollama inputs.)
+    if (cfg.mode === 'ollama') {
+      if (cfg.base_url) ollamaBaseUrl.value = String(cfg.base_url)
+      if (cfg.model) ollamaModel.value = String(cfg.model)
+    }
+  } catch (e) {
+    llmConfigError.value = e instanceof Error ? e.message : String(e)
+  } finally {
+    suppressLlmModeAutoApply -= 1
+    llmConfigLoading.value = false
+  }
+}
+
+async function applyLlmMode(mode: 'ollama' | 'openai_compat') {
+  llmConfigLoading.value = true
+  llmConfigError.value = ''
+  try {
+    // Note: openai_compat secrets and ollama defaults are configured via env.
+    // The UI only switches the active mode.
+    await setLlmConfig(
+      mode === 'ollama'
+        ? {
+            mode,
+            ollama_base_url: ollamaBaseUrl.value.trim() || undefined,
+            ollama_model: ollamaModel.value.trim() || undefined,
+          }
+        : { mode }
+    )
+    await refreshLlmConfig()
+    await refreshLlm()
+  } catch (e) {
+    llmConfigError.value = e instanceof Error ? e.message : String(e)
+  } finally {
+    llmConfigLoading.value = false
+  }
+}
+
+function scheduleApplyLlmConfig(debounceMs = 0) {
+  if (!llmModeAutoApplyEnabled) return
+  if (suppressLlmModeAutoApply > 0) return
+
+  if (llmConfigApplyTimer !== null) {
+    window.clearTimeout(llmConfigApplyTimer)
+    llmConfigApplyTimer = null
+  }
+
+  llmConfigApplyTimer = window.setTimeout(() => {
+    llmConfigApplyTimer = null
+    pendingLlmMode = llmMode.value
+    void flushPendingLlmMode()
+  }, debounceMs)
+}
+
+async function flushPendingLlmMode() {
+  if (llmConfigLoading.value) return
+  const mode = pendingLlmMode
+  if (!mode) return
+  pendingLlmMode = null
+  await applyLlmMode(mode)
+  if (pendingLlmMode) await flushPendingLlmMode()
+}
+
+watch(
+  llmMode,
+  (mode) => {
+    if (!llmModeAutoApplyEnabled) return
+    if (suppressLlmModeAutoApply > 0) return
+    pendingLlmMode = mode
+    void flushPendingLlmMode()
+  },
+  { flush: 'post' }
+)
+
+watch(
+  [ollamaBaseUrl, ollamaModel],
+  () => {
+    if (!llmModeAutoApplyEnabled) return
+    if (suppressLlmModeAutoApply > 0) return
+    if (llmMode.value !== 'ollama') return
+    // debounce a bit while typing
+    scheduleApplyLlmConfig(300)
+  },
+  { flush: 'post' }
+)
 
 async function refreshDb() {
   dbLoading.value = true
@@ -245,6 +356,9 @@ async function onGenerateDiagram() {
       const submit = await submitDiagramTask(payload)
       const status = await waitTask(submit.task_id)
       const result = (status.result ?? {}) as Record<string, unknown>
+      if (status.state === 'FAILURE') {
+        throw new Error(String(result.error ?? 'Task failed'))
+      }
       const mermaid = String(result.mermaid ?? '')
       diagramMermaid.value = mermaid
       diagramSvg.value = mermaid ? await renderMermaid(`m-${Date.now()}`, mermaid) : ''
@@ -275,6 +389,9 @@ async function onGenerateIntegration() {
       const submit = await submitIntegrationTask(payload)
       const status = await waitTask(submit.task_id)
       const result = (status.result ?? {}) as Record<string, unknown>
+      if (status.state === 'FAILURE') {
+        throw new Error(String(result.error ?? 'Task failed'))
+      }
       integrationMarkdown.value = String(result.markdown ?? '')
     } else {
       const res = await generateIntegration(payload)
@@ -328,11 +445,13 @@ async function onComputeSettlement() {
 
 watch(metricsRows, () => updateChart())
 
-onMounted(() => {
+onMounted(async () => {
   updateChart()
   statusPanelCollapsed.value = loadBoolFromStorage(STORAGE_KEYS.statusPanelCollapsed, false)
-  refreshLlm()
-  refreshDb()
+  await refreshLlmConfig()
+  await refreshLlm()
+  await refreshDb()
+  llmModeAutoApplyEnabled = true
 })
 
 watch(statusPanelCollapsed, (v) => saveBoolToStorage(STORAGE_KEYS.statusPanelCollapsed, v))
@@ -455,19 +574,55 @@ async function loadArtifact(id: string) {
                     <span v-else>-</span>
                   </el-descriptions-item>
                   <el-descriptions-item label="当前模式">
-                    <el-tag v-if="llm" :type="llm.ok ? 'success' : 'danger'">{{ llm.mode }}</el-tag>
-                    <span v-else>-</span>
+                    <div style="display: flex; align-items: center; gap: 10px; flex-wrap: wrap">
+                      <el-tag v-if="llm" :type="llm.ok ? 'success' : 'danger'">{{ llm.mode }}</el-tag>
+                      <span v-else>-</span>
+
+                      <el-select
+                        v-model="llmMode"
+                        size="small"
+                        :disabled="llmConfigLoading"
+                        :loading="llmConfigLoading"
+                        loading-text="模型切换中…"
+                        style="min-width: 210px"
+                      >
+                        <el-option label="ollama（本地模型）" value="ollama" />
+                        <el-option label="openai_compat（兼容网关）" value="openai_compat" />
+                      </el-select>
+                    </div>
+
+                    <div v-if="llmMode === 'ollama'" style="margin-top: 10px">
+                      <el-form label-position="top" size="small" style="max-width: 520px">
+                        <el-form-item label="Ollama Base URL">
+                          <el-input v-model="ollamaBaseUrl" placeholder="http://localhost:11434" :disabled="llmConfigLoading" />
+                        </el-form-item>
+                        <el-form-item label="Ollama Model">
+                          <el-select
+                            v-model="ollamaModel"
+                            filterable
+                            allow-create
+                            default-first-option
+                            placeholder="选择或输入模型名（例如 llama3.2:1b）"
+                            style="width: 100%"
+                            :disabled="llmConfigLoading"
+                          >
+                            <el-option v-for="m in ollamaPresetModels" :key="m" :label="m" :value="m" />
+                          </el-select>
+                        </el-form-item>
+                      </el-form>
+                    </div>
+
+                    <el-alert
+                      v-if="llmConfigError"
+                      type="error"
+                      :title="llmConfigError"
+                      show-icon
+                      :closable="false"
+                      class="mt"
+                    />
                   </el-descriptions-item>
                   <el-descriptions-item label="Provider">
                     <span v-if="llm">{{ llm.provider }}</span>
-                    <span v-else>-</span>
-                  </el-descriptions-item>
-                  <el-descriptions-item label="Model">
-                    <span v-if="llm">{{ llm.model || '-' }}</span>
-                    <span v-else>-</span>
-                  </el-descriptions-item>
-                  <el-descriptions-item label="Base URL">
-                    <span v-if="llm">{{ llm.base_url || '-' }}</span>
                     <span v-else>-</span>
                   </el-descriptions-item>
                   <el-descriptions-item label="延迟">
@@ -475,20 +630,6 @@ async function loadArtifact(id: string) {
                     <span v-else>-</span>
                   </el-descriptions-item>
                 </el-descriptions>
-
-                <el-alert
-                  class="mt"
-                  type="info"
-                  title="如何切换到本地模型（Ollama）"
-                  :closable="false"
-                  show-icon
-                >
-                  <div>
-                    1) 安装并启动 Ollama（默认地址 http://localhost:11434）<br />
-                    2) 在 .env 中设置：LLM_MODE=ollama，OLLAMA_MODEL=qwen2.5:7b（或你的模型）<br />
-                    3) 重启后端，再点「刷新」即可看到模式变化
-                  </div>
-                </el-alert>
               </el-col>
 
               <el-col :span="14">

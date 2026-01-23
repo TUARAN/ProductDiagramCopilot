@@ -18,6 +18,11 @@ help:
 	@echo "  migrate-script   Run ./scripts/migrate.sh"
 	@echo "  worker-script    Run ./scripts/dev-worker.sh"
 	@echo "  frontend-script  Run ./scripts/dev-frontend.sh"
+	@echo "  ollama-pack      Build offline Ollama model pack (from $$HOME/.ollama/models)"
+	@echo "  ollama-bundle    Scheme A: copy $$HOME/.ollama/models into Tauri resources"
+	@echo "  ollama-sidecar   Copy macOS Ollama.app binary into Tauri sidecar bins"
+	@echo "  backend-sidecar  Build backend sidecar (macOS) via PyInstaller"
+	@echo "  tauri-build-offline  Scheme A: bundle models+ollama and build DMG"
 
 venv:
 	@test -d .venv || python3 -m venv .venv
@@ -57,3 +62,18 @@ worker-script:
 
 migrate-script:
 	./scripts/migrate.sh
+
+ollama-pack:
+	@bash ./scripts/make-ollama-offline-pack.sh "$$HOME/.ollama/models"
+
+ollama-bundle:
+	@bash ./scripts/prepare-bundled-ollama-models.sh "$$HOME/.ollama/models"
+
+ollama-sidecar:
+	@bash ./scripts/prepare-bundled-ollama-binary.sh
+
+backend-sidecar:
+	@bash ./scripts/build-backend-sidecar-macos.sh
+
+tauri-build-offline: ollama-bundle ollama-sidecar backend-sidecar
+	@cd frontend && npm run tauri:build

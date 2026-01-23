@@ -142,7 +142,26 @@ product-diagram-copilot/
 
 ## ✅ 快速开始（本地可运行骨架）
 
-> 说明：当前版本以 **Mock LLM** 默认可跑通端到端（无需 Key）。后续接入真实模型时，只要改 `LLM_MODE` 与相关环境变量。
+> 说明：当前版本默认使用 **Ollama 本地模型**（离线可用）。如需使用兼容网关（OpenAI-compatible），修改 `LLM_MODE` 与相关环境变量。
+
+## 离线打包（含 Ollama 模型）
+
+如果你希望“安装后无需联网即可用”，最简单粗暴的方式是把 Ollama 的模型缓存目录一起分发：
+
+- 方案 A：把 `~/.ollama/models`（Windows 为 `%USERPROFILE%\\.ollama\\models`）直接打进安装包（体积巨大）
+- 方案 B（推荐）：提供“离线模型扩展包”，用户安装后解压到上述目录
+
+详细步骤见 [docs/offline-ollama.md](docs/offline-ollama.md)。
+
+## 桌面版打包产物（macOS / Windows / Linux）
+
+不是只有 DMG。
+
+- macOS：`npm run tauri:build` 会生成 `.app` 与 `.dmg`
+- Windows：会生成 Windows 安装包（常见为 `.msi`，具体取决于 Tauri bundler 与平台依赖）
+- Linux：会生成 Linux 安装包（常见为 `.deb` / `.rpm` / AppImage，具体取决于平台依赖）
+
+说明：桌面版打包一般需要在 **对应系统** 上构建（例如 Windows 安装包建议在 Windows 上构建）。
 
 ### 1) 启动依赖（可选，但推荐）
 
@@ -179,6 +198,15 @@ product-diagram-copilot/
 
 ### 3) 启动前端（Vue3 工作台）
 
+当前同时支持两种使用方式：
+
+| 方式 | 入口形态 | 前端启动命令 | 后端要求 | 访问/展示 |
+|---|---|---|---|---|
+| 网页版本（浏览器） | 浏览器页面 | `npm run dev` | 需要你先启动后端 | 打开 `http://localhost:5173` |
+| 桌面版本（Tauri） | 原生桌面窗口 | `npm run tauri:dev` | 可自动拉起后端（8000 未启动时） | 直接打开桌面窗口 |
+
+> 两种方式共用同一套前端界面与同一套后端 API；桌面版不会影响网页版。
+
 `cd frontend`
 
 `npm i`
@@ -199,7 +227,12 @@ product-diagram-copilot/
 
 ## 🖥️ 桌面版（Tauri）
 
-说明：桌面版复用当前前端界面；后端仍以本地 FastAPI 方式运行（默认 `http://localhost:8000`）。
+说明：桌面版复用当前前端界面。
+
+- 开发模式：可以连接你手动启动的后端（默认 `http://127.0.0.1:8000`），或由 `npm run tauri:dev` 在 8000 未启动时自动拉起后端。
+- 打包产物：会内置 `pdc-backend` sidecar（后端 API）与 `ollama` sidecar（本地模型服务）；并在桌面模式下默认使用 SQLite + 本地文件存储（位于应用数据目录）。
+
+> 已做便捷化：`npm run tauri:dev` 会自动拉起后端（若 8000 未启动），再启动 Vite。
 
 1) 启动后端（任选一种）：
 
@@ -215,6 +248,12 @@ product-diagram-copilot/
 
 `npm run tauri:dev`
 
+（如需关闭自动拉起后端：先手动启动后端，再运行 `npm run tauri:dev` 即可；脚本会检测 `/health`，已启动则跳过。）
+
+### 网页版仍然可用
+
+桌面版不会影响网页版：你仍然可以按“启动后端 + `npm run dev`”的方式使用浏览器访问 `http://localhost:5173`。
+
 3) 打包桌面端：
 
 `cd frontend`
@@ -222,6 +261,20 @@ product-diagram-copilot/
 `npm run tauri:build`
 
 > 首次打包需要本机安装 Rust 工具链（`rustup`）以及对应平台的构建依赖（Tauri 会在报错信息里提示）。
+
+### 桌面离线一键打包（方案 A，体积大）
+
+桌面离线版需要同时打包：
+
+- 后端 API（`pdc-backend` sidecar，用于提供 `/api/*`）
+- Ollama（`ollama` sidecar，用于提供本地模型服务）
+- 可选：Ollama 模型缓存（`resources/ollama_models/`，体积巨大）
+
+macOS 一键命令：
+
+`make tauri-build-offline`
+
+更多细节见 [docs/offline-ollama.md](docs/offline-ollama.md)。
 
 ### 4) 三个核心接口（已实现骨架）
 
@@ -243,14 +296,14 @@ product-diagram-copilot/
 
 ## 🔧 模型切换
 
-后端默认 `LLM_MODE=mock`。
+后端默认 `LLM_MODE=ollama`。
 
 - OpenAI 兼容网关：设置 `LLM_MODE=openai_compat`，并配置 `OPENAI_COMPAT_BASE_URL/OPENAI_COMPAT_API_KEY/OPENAI_COMPAT_MODEL`
   - `OPENAI_COMPAT_BASE_URL` 支持两种形式：`https://xxx` 或 `https://xxx/v1`
   - 例如：`OPENAI_COMPAT_BASE_URL=https://api.gptsapi.net`
   - 如果你的网关使用 `/v1/responses`（例如 gptsapi），设置 `OPENAI_COMPAT_API_STYLE=responses`
   - 建议把环境变量放到 `.env`（项目根目录）或 `backend/.env`（二选一），参考 `backend/.env.example`
-- Ollama：设置 `LLM_MODE=ollama`，并配置 `OLLAMA_BASE_URL/OLLAMA_MODEL`
+- Ollama（本地离线）：设置 `LLM_MODE=ollama`，并配置 `OLLAMA_BASE_URL/OLLAMA_MODEL`
 
 ---
 

@@ -11,6 +11,8 @@ def diagram_prompt(diagram_type: str, text: str, scene: Optional[str]) -> list[C
     sys = (
         "你是资深产品/系统分析助手。\n"
         "你只输出严格 JSON（不要 markdown，不要解释）。\n"
+        "输出必须是单个 JSON 对象：第一字符是 {，最后字符是 }。\n"
+        "必须包含字段 type，且 type 必须等于输入的 diagram_type。\n"
         "根据输入文本提取结构化图规范（Diagram Spec）。\n"
         "必须可用于生成 Mermaid。"
     )
