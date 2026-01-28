@@ -21,7 +21,7 @@
 ### 模式一：模型 API 调用（默认）
 
 * 可对接：
-  * OpenAI / Azure OpenAI
+  * 兼容网关（对接主流对话/响应式 API）
   * DeepSeek / 通义 / 其他企业模型平台
 * 适合内网可访问外部 API 或已有模型服务场景
 * 优势：部署轻、效果稳定、快速迭代
@@ -143,7 +143,7 @@ product-diagram-copilot/
 
 ## ✅ 快速开始（本地可运行骨架）
 
-> 说明：当前版本默认使用 **Ollama 本地模型**（离线可用）。如需使用兼容网关（OpenAI-compatible），修改 `LLM_MODE` 与相关环境变量。
+> 说明：当前版本默认使用 **Ollama 本地模型**（离线可用）。如需使用兼容网关，修改 `LLM_MODE` 与相关环境变量。
 
 ## 离线打包（含 Ollama 模型）
 
@@ -299,10 +299,10 @@ macOS 一键命令：
 
 后端默认 `LLM_MODE=ollama`。
 
-- OpenAI 兼容网关：设置 `LLM_MODE=openai_compat`，并配置 `OPENAI_COMPAT_BASE_URL/OPENAI_COMPAT_API_KEY/OPENAI_COMPAT_MODEL`
-  - `OPENAI_COMPAT_BASE_URL` 支持两种形式：`https://xxx` 或 `https://xxx/v1`
-  - 例如：`OPENAI_COMPAT_BASE_URL=https://api.gptsapi.net`
-  - 如果你的网关使用 `/v1/responses`（例如 gptsapi），设置 `OPENAI_COMPAT_API_STYLE=responses`
+- 兼容网关：设置 `LLM_MODE=compat`，并配置 `COMPAT_BASE_URL/COMPAT_API_KEY/COMPAT_MODEL`
+  - `COMPAT_BASE_URL` 支持两种形式：`https://xxx` 或 `https://xxx/v1`
+  - 例如：`COMPAT_BASE_URL=https://api.gptsapi.net`
+  - 如果你的网关使用 `/v1/responses`，设置 `COMPAT_API_STYLE=responses`
   - 建议把环境变量放到 `.env`（项目根目录）或 `backend/.env`（二选一），参考 `backend/.env.example`
 - Ollama（本地离线）：设置 `LLM_MODE=ollama`，并配置 `OLLAMA_BASE_URL/OLLAMA_MODEL`
 

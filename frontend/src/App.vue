@@ -43,7 +43,7 @@ const diagramText = ref('')
 const drawioGenText = ref('')
 
 // Business optional configuration (front-end)
-const selectedBusinessId = ref<BusinessId | ''>('')
+const selectedBusinessId = ref<BusinessId>('yuexin_integration')
 const selectedTemplateId = ref<string>('')
 const selectedStrategyId = ref<StrategyId | ''>('')
 
@@ -146,10 +146,29 @@ function applyStrategyRouting() {
 watch(
   selectedBusinessId,
   () => {
-    // Business selection should not default template/strategy.
-    selectedTemplateId.value = ''
-    selectedStrategyId.value = ''
-  }
+    const biz = selectedBusiness.value
+    if (!biz) {
+      selectedTemplateId.value = ''
+      selectedStrategyId.value = ''
+      return
+    }
+
+    // When switching business, align to its default template and let the
+    // template watcher pick the recommended strategy.
+    const defaultTemplateId = biz.defaults.templateId
+    const templates = templatesForBusiness.value
+    selectedTemplateId.value = templates.some((t) => t.templateId === defaultTemplateId)
+      ? defaultTemplateId
+      : (templates[0]?.templateId ?? '')
+
+    // Default strategy: prefer business default, otherwise fall back to first enabled.
+    const preferred = biz.defaults.strategyId
+    const enabled = new Set(biz.enabledStrategies)
+    selectedStrategyId.value = enabled.has(preferred)
+      ? preferred
+      : (biz.enabledStrategies[0] ?? '')
+  },
+  { immediate: true }
 )
 
 watch(selectedTemplateId, () => {
@@ -157,6 +176,10 @@ watch(selectedTemplateId, () => {
   // If template recommends strategies, align to its first recommendation.
   const rec = selectedTemplate.value?.recommendedStrategyIds?.[0]
   if (rec && !selectedStrategyId.value) selectedStrategyId.value = rec
+  if (!selectedStrategyId.value) {
+    const first = strategiesForSelection.value[0]?.strategyId
+    if (first) selectedStrategyId.value = first
+  }
   applyStrategyRouting()
   applyTemplateSeed()
 })
@@ -555,6 +578,22 @@ const backendApiBaseReal = computed(() => {
   return 'http://localhost:8000/api'
 })
 
+const llmModeLabel = computed(() => {
+  const mode = llm.value?.mode || llmMode.value
+  return mode === 'openai_compat' ? 'compat' : 'ollama'
+})
+
+const llmProviderLabel = computed(() => {
+  const p = (llm.value?.provider || '').trim()
+  return p === 'openai_compat' ? 'compat' : p
+})
+
+const llmModelLabel = computed(() => {
+  const m = (llm.value?.model || '').trim()
+  if (!m) return '-'
+  return m.replace(/gpt-5\.2/g, 'compat-5.2')
+})
+
 async function refreshLlm() {
   llmLoading.value = true
   llmError.value = ''
@@ -574,12 +613,12 @@ async function refreshLlmConfig() {
   suppressLlmModeAutoApply += 1
   try {
     const cfg = await getLlmConfig()
-    // We only expose ollama / openai_compat in the UI.
+    // We only expose ollama / compat in the UI.
     // If backend returns an unexpected mode, treat it as ollama (local) to avoid a dead-end UI.
     llmMode.value = cfg.mode === 'openai_compat' ? 'openai_compat' : 'ollama'
 
     // Auto-fill ollama settings when backend is in ollama mode.
-    // (When in openai_compat, cfg.base_url refers to gateway URL and should not overwrite ollama inputs.)
+    // (When in compat mode, cfg.base_url refers to gateway URL and should not overwrite ollama inputs.)
     if (cfg.mode === 'ollama') {
       if (cfg.base_url) ollamaBaseUrl.value = String(cfg.base_url)
       if (cfg.model) ollamaModel.value = String(cfg.model)
@@ -596,7 +635,7 @@ async function applyLlmMode(mode: 'ollama' | 'openai_compat') {
   llmConfigLoading.value = true
   llmConfigError.value = ''
   try {
-    // Note: openai_compat secrets and ollama defaults are configured via env.
+    // Note: compat secrets and ollama defaults are configured via env.
     // The UI only switches the active mode.
     await setLlmConfig(
       mode === 'ollama'
@@ -680,13 +719,13 @@ async function refreshDb() {
 const featureMatrix = computed(() => {
   return [
     {
-      feature: '自动出图（同步）',
+      feature: '流程图（同步）',
       llm: '会',
       api: 'POST /api/diagram/generate',
       optional: '无',
     },
     {
-      feature: '自动出图（异步）',
+      feature: '流程图（异步）',
       llm: '会',
       api: 'POST /api/tasks/diagram + GET /api/tasks/{id}',
       optional: 'Celery/Redis 可选（默认 inproc）',
@@ -1156,9 +1195,9 @@ async function loadArtifact(id: string) {
             </el-tag>
             <el-tag size="small" type="info">DB Latency: {{ db?.latency_ms ?? '-' }}ms</el-tag>
             <el-tag size="small" :type="llm?.ok ? 'success' : 'warning'">
-              LLM: {{ llm?.mode || 'unknown' }}
+              LLM: {{ llmModeLabel }}
             </el-tag>
-            <el-tag size="small" type="info">Model: {{ llm?.model || '-' }}</el-tag>
+            <el-tag size="small" type="info">Model: {{ llmModelLabel }}</el-tag>
             <el-tag size="small" type="info">Latency: {{ llm?.latency_ms ?? '-' }}ms</el-tag>
             <el-button size="small" @click="() => { statusPanelOpen = !statusPanelOpen }">
               {{ statusPanelOpen ? '收起状态面板' : '状态面板' }}
@@ -1285,7 +1324,7 @@ async function loadArtifact(id: string) {
                   </el-descriptions-item>
                   <el-descriptions-item label="当前模式">
                     <div style="display: flex; align-items: center; gap: 10px; flex-wrap: wrap">
-                      <el-tag v-if="llm" :type="llm.ok ? 'success' : 'danger'">{{ llm.mode }}</el-tag>
+                      <el-tag v-if="llm" :type="llm.ok ? 'success' : 'danger'">{{ llmModeLabel }}</el-tag>
                       <span v-else>-</span>
 
                       <el-select
@@ -1297,7 +1336,7 @@ async function loadArtifact(id: string) {
                         style="min-width: 210px"
                       >
                         <el-option label="ollama（本地模型）" value="ollama" />
-                        <el-option label="openai_compat（兼容网关）" value="openai_compat" />
+                        <el-option label="compat（兼容网关）" value="openai_compat" />
                       </el-select>
                     </div>
 
@@ -1332,7 +1371,7 @@ async function loadArtifact(id: string) {
                     />
                   </el-descriptions-item>
                   <el-descriptions-item label="Provider">
-                    <span v-if="llm">{{ llm.provider }}</span>
+                    <span v-if="llm">{{ llmProviderLabel || '-' }}</span>
                     <span v-else>-</span>
                   </el-descriptions-item>
                   <el-descriptions-item label="延迟">
@@ -1370,7 +1409,7 @@ async function loadArtifact(id: string) {
         </el-card>
 
         <el-tabs v-model="activeTab" class="tabs">
-          <el-tab-pane label="自动出图（mermaid）" name="diagram">
+          <el-tab-pane label="流程图（mermaid）" name="diagram">
             <el-row :gutter="16">
               <el-col :span="10">
                 <el-form label-position="top">
