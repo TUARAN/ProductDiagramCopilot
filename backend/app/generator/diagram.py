@@ -5,11 +5,11 @@ from typing import Any, Literal, Optional
 from pydantic import BaseModel, Field
 
 
-DiagramType = Literal["flow", "sequence", "state", "cmic_report"]
+DiagramType = Literal["flow", "sequence", "state"]
 
 
 class DiagramGenerateRequest(BaseModel):
-    diagram_type: DiagramType = Field(description="flow | sequence | state | cmic_report")
+    diagram_type: DiagramType = Field(description="flow | sequence | state")
     text: str
     scene: Optional[str] = None
 
@@ -17,3 +17,11 @@ class DiagramGenerateRequest(BaseModel):
 class DiagramGenerateResponse(BaseModel):
     spec: dict[str, Any]
     mermaid: str
+
+
+class DrawioXmlGenerateRequest(BaseModel):
+    text: str = Field(description="User description to be converted into draw.io mxfile XML")
+
+
+class DrawioXmlGenerateResponse(BaseModel):
+    xml: str = Field(description="draw.io mxfile XML")

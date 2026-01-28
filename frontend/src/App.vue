@@ -1,11 +1,13 @@
 <script setup lang="ts">
-import { computed, onMounted, ref, watch } from 'vue'
+import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import * as echarts from 'echarts'
 import { Loading } from '@element-plus/icons-vue'
+import { jsPDF } from 'jspdf'
 
 import {
   dbPing,
   generateDiagram,
+  generateDrawioXml,
   generateIntegration,
   getArtifact,
   getTaskStatus,
@@ -23,10 +25,13 @@ import {
 } from './lib/api'
 import { renderMermaid } from './lib/mermaid'
 
-const activeTab = ref<'diagram' | 'integration' | 'settlement' | 'artifacts'>('diagram')
+import drawioBlankXml from './assets/drawio-blank.drawio?raw'
+
+const activeTab = ref<'diagram' | 'drawio' | 'integration' | 'settlement' | 'artifacts'>('diagram')
 
 const STORAGE_KEYS = {
   statusPanelCollapsed: 'pdc:statusPanelCollapsed',
+  drawioXml: 'pdc:drawioXml',
 } as const
 
 const statusPanelCollapsed = ref(false)
@@ -47,6 +52,328 @@ function saveBoolToStorage(key: string, value: boolean) {
   } catch {
     // ignore
   }
+}
+
+// draw.io (diagrams.net) embedded editor
+type DrawioExportKind = 'png' | 'pdf'
+
+const drawioFrame = ref<HTMLIFrameElement | null>(null)
+const drawioReady = ref(false)
+const drawioError = ref('')
+const drawioStatus = ref('')
+const drawioBusy = ref(false)
+const drawioXml = ref('')
+let drawioPendingSave: ((xml: string) => void) | null = null
+let drawioPendingExport: DrawioExportKind | null = null
+
+const drawioGenText = ref('')
+const drawioGenLoading = ref(false)
+
+const drawioEmbedUrl = computed(() => {
+  const params = new URLSearchParams({
+    embed: '1',
+    proto: 'json',
+    spin: '1',
+    libraries: '1',
+    noExitBtn: '1',
+    ui: 'min',
+    lang: 'zh',
+  })
+  return `https://embed.diagrams.net/?${params.toString()}`
+})
+
+function onDrawioMessage(ev: MessageEvent) {
+  if (ev.origin !== 'https://embed.diagrams.net') return
+  const msg = parseDrawioMessage(ev.data)
+  if (!msg) return
+
+  if (msg.error) {
+    drawioError.value = String(msg.error)
+    drawioBusy.value = false
+    drawioPendingExport = null
+    return
+  }
+
+  if (msg.event === 'init') {
+    drawioReady.value = true
+    loadDrawio(drawioXml.value || drawioBlankXml)
+    return
+  }
+
+  if (msg.event === 'load') {
+    drawioStatus.value = '已加载'
+    return
+  }
+
+  if (msg.event === 'autosave' || msg.event === 'save') {
+    const xml = typeof msg.xml === 'string' ? msg.xml : ''
+    if (xml) {
+      drawioXml.value = xml
+      saveTextToStorage(STORAGE_KEYS.drawioXml, xml)
+      drawioStatus.value = msg.event === 'save' ? '已保存' : '自动保存'
+      if (drawioPendingSave) drawioPendingSave(xml)
+    }
+    return
+  }
+
+  if (msg.event === 'export') {
+    const dataUri = typeof msg.data === 'string' ? msg.data : ''
+    const pending = drawioPendingExport
+    drawioPendingExport = null
+    drawioBusy.value = false
+    if (!dataUri) {
+      drawioError.value = '导出失败（未返回 data URI）'
+      return
+    }
+
+    const date = new Date().toISOString().slice(0, 10)
+    if (pending === 'png') {
+      downloadDataUri(`drawio-${date}.png`, dataUri)
+      drawioStatus.value = '已导出 PNG'
+      return
+    }
+
+    if (pending === 'pdf') {
+      void (async () => {
+        try {
+          const img = await dataUriToImage(dataUri)
+          const orientation = img.width >= img.height ? 'landscape' : 'portrait'
+          const pdf = new jsPDF({
+            orientation,
+            unit: 'px',
+            format: [img.width, img.height],
+            compress: true,
+          })
+          pdf.addImage(dataUri, 'PNG', 0, 0, img.width, img.height)
+          pdf.save(`drawio-${date}.pdf`)
+          drawioStatus.value = '已导出 PDF'
+        } catch (e) {
+          drawioError.value = e instanceof Error ? e.message : String(e)
+        }
+      })()
+    }
+  }
+}
+
+function loadTextFromStorage(key: string, fallback: string) {
+  try {
+    const raw = localStorage.getItem(key)
+    return raw === null ? fallback : raw
+  } catch {
+    return fallback
+  }
+}
+
+function saveTextToStorage(key: string, value: string) {
+  try {
+    localStorage.setItem(key, value)
+  } catch {
+    // ignore
+  }
+}
+
+function postToDrawio(message: Record<string, unknown>) {
+  const win = drawioFrame.value?.contentWindow
+  if (!win) return
+  // Embed mode is only supported on embed.diagrams.net
+  win.postMessage(JSON.stringify(message), 'https://embed.diagrams.net')
+}
+
+function parseDrawioMessage(data: unknown): any | null {
+  if (typeof data !== 'string') return null
+  try {
+    return JSON.parse(data)
+  } catch {
+    return null
+  }
+}
+
+function loadDrawio(xml: string) {
+  if (!drawioReady.value) return
+  drawioError.value = ''
+  drawioStatus.value = '正在加载…'
+  postToDrawio({
+    action: 'load',
+    xml,
+    autosave: 1,
+    title: '架构图（draw.io）',
+  })
+}
+
+function requestDrawioSave(timeoutMs = 4000): Promise<string> {
+  if (!drawioReady.value) return Promise.reject(new Error('draw.io 未就绪'))
+  drawioError.value = ''
+  drawioStatus.value = '正在保存…'
+  drawioBusy.value = true
+  return new Promise((resolve, reject) => {
+    const timer = window.setTimeout(() => {
+      if (drawioPendingSave) drawioPendingSave = null
+      drawioBusy.value = false
+      reject(new Error('保存超时（draw.io 未返回 save 事件）'))
+    }, timeoutMs)
+
+    drawioPendingSave = (xml: string) => {
+      window.clearTimeout(timer)
+      drawioPendingSave = null
+      drawioBusy.value = false
+      resolve(xml)
+    }
+
+    postToDrawio({ action: 'save' })
+  })
+}
+
+async function ensureLatestDrawioXml() {
+  // If autosave is enabled, we likely already have XML.
+  if (drawioXml.value) return drawioXml.value
+  const xml = await requestDrawioSave()
+  return xml
+}
+
+async function onDrawioSaveClick() {
+  try {
+    await requestDrawioSave()
+  } catch (e) {
+    drawioError.value = e instanceof Error ? e.message : String(e)
+  }
+}
+
+function downloadDataUri(filename: string, dataUri: string) {
+  const a = document.createElement('a')
+  a.href = dataUri
+  a.download = filename
+  a.rel = 'noopener'
+  document.body.appendChild(a)
+  a.click()
+  a.remove()
+}
+
+function dataUriToImage(dataUri: string): Promise<HTMLImageElement> {
+  return new Promise((resolve, reject) => {
+    const img = new Image()
+    img.onload = () => resolve(img)
+    img.onerror = () => reject(new Error('无法加载导出的 PNG'))
+    img.src = dataUri
+  })
+}
+
+async function exportDrawio(kind: DrawioExportKind) {
+  if (!drawioReady.value) return
+  drawioError.value = ''
+  drawioStatus.value = '正在导出…'
+  drawioBusy.value = true
+  drawioPendingExport = kind
+  const xml = await ensureLatestDrawioXml().catch((e) => {
+    drawioBusy.value = false
+    drawioError.value = e instanceof Error ? e.message : String(e)
+    return ''
+  })
+  if (!xml) return
+
+  postToDrawio({
+    action: 'export',
+    format: 'png',
+    // Higher scale for sharper PNG/PDF
+    scale: 2,
+    transparent: true,
+    xml,
+    spin: '1',
+    message: '正在生成图片…',
+  })
+}
+
+async function exportDrawioJson() {
+  drawioError.value = ''
+  try {
+    const xml = await ensureLatestDrawioXml()
+    const payload = {
+      format: 'drawio',
+      version: 1,
+      exported_at: new Date().toISOString(),
+      xml,
+    }
+    downloadTextFile(
+      `drawio-${new Date().toISOString().slice(0, 10)}.json`,
+      JSON.stringify(payload, null, 2),
+      'application/json;charset=utf-8'
+    )
+    drawioStatus.value = '已导出 JSON'
+  } catch (e) {
+    drawioError.value = e instanceof Error ? e.message : String(e)
+  }
+}
+
+async function exportDrawioXmlFile() {
+  drawioError.value = ''
+  try {
+    const xml = await ensureLatestDrawioXml()
+    downloadTextFile(
+      `drawio-${new Date().toISOString().slice(0, 10)}.drawio`,
+      xml,
+      'application/xml;charset=utf-8'
+    )
+    drawioStatus.value = '已导出 .drawio'
+  } catch (e) {
+    drawioError.value = e instanceof Error ? e.message : String(e)
+  }
+}
+
+function resetDrawioToMock() {
+  drawioXml.value = drawioBlankXml
+  saveTextToStorage(STORAGE_KEYS.drawioXml, drawioXml.value)
+  loadDrawio(drawioXml.value)
+  drawioStatus.value = '已重置为默认模板'
+}
+
+async function onGenerateDrawioFromText() {
+  drawioError.value = ''
+
+  const text = (drawioGenText.value || '').trim()
+  if (!text) {
+    drawioError.value = '请先输入描述文本'
+    return
+  }
+  if (drawioGenLoading.value || drawioBusy.value) return
+
+  drawioGenLoading.value = true
+  try {
+    const resp = await generateDrawioXml({ text })
+    const xml = (resp?.xml || '').trim()
+    if (!xml) throw new Error('生成失败（未返回 XML）')
+
+    drawioXml.value = xml
+    saveTextToStorage(STORAGE_KEYS.drawioXml, drawioXml.value)
+
+    // If iframe already initialized, load immediately. Otherwise it will load on init.
+    if (drawioReady.value) loadDrawio(drawioXml.value)
+    drawioStatus.value = '已根据描述生成并加载'
+  } catch (e) {
+    drawioError.value = e instanceof Error ? e.message : String(e)
+  } finally {
+    drawioGenLoading.value = false
+  }
+}
+
+async function importDrawioFile(file: File) {
+  drawioError.value = ''
+  try {
+    const text = await file.text()
+    drawioXml.value = text
+    saveTextToStorage(STORAGE_KEYS.drawioXml, drawioXml.value)
+    loadDrawio(drawioXml.value)
+    drawioStatus.value = `已导入：${file.name}`
+  } catch (e) {
+    drawioError.value = e instanceof Error ? e.message : String(e)
+  }
+}
+
+function onDrawioFileInputChange(ev: Event) {
+  const input = ev.target as HTMLInputElement
+  const file = input.files?.[0]
+  // allow selecting the same file repeatedly
+  input.value = ''
+  if (!file) return
+  void importDrawioFile(file)
 }
 
 // LLM status (visualize where we call API / local model)
@@ -370,22 +697,6 @@ const diagramDefaultTextByType: Record<DiagramType, string> = {
   flow: '用户提交退款申请 -> 系统校验 -> 进入人工审核 -> 审核通过则发起打款 -> 更新退款状态 -> 通知用户',
   sequence: '用户在 App 下单并支付；订单系统调用库存系统锁定库存；支付系统回调订单系统确认支付；订单系统通知用户下单成功。',
   state: '一个订单从创建到完成：创建(待支付) -> 已支付 -> 已发货 -> 已完成；支付失败或超时进入已取消；退款进入已退款。',
-  cmic_report: `✅【通用版】企业级智能体平台架构图绘制指令
-
-你是一名 企业级 AI 平台架构图设计专家，擅长将复杂系统抽象为 可汇报、可扩展、可复用 的平台架构示意图。
-
-请绘制一张「智能体平台总体架构图」，要求：
-- 扁平化企业级风格，主色调蓝色系，辅助浅绿色/浅灰
-- 自上而下分层架构，每层是浅色容器，层名称清晰
-- 强调平台能力，不出现代码/实现细节/具体产品品牌名
-
-分层（从上到下）：
-1) 应用层：用户交互型/场景任务型/安全治理型/可扩展入口（可按行业：政务/金融/通信/内容；按对象：ToB/ToC/内部员工）
-2) 智能体服务层：协同编排/认知决策/知识体系/多模型调度/组件能力池/画像标签/插件货架
-3) 调度与运行层：路由调度/业务接入适配/消息事件驱动/生态第三方接入
-4) 基础支撑层：身份权限/注册发现授权/安全合规/协议标准
-
-只需要替换：图标题、平台命名短语、各层模块文案，其余结构固定。`,
 }
 
 const diagramSampleMermaidFallbackByType: Record<DiagramType, string> = {
@@ -405,70 +716,6 @@ const diagramSampleMermaidFallbackByType: Record<DiagramType, string> = {
   Idle --> Processing: start
   Processing --> Done: finish
   Done --> [*]
-`,
-  cmic_report: `%%{init: {"flowchart": {"curve": "linear"}} }%%
-flowchart TB
-
-classDef cmic_outer fill:#EFF9F7,stroke:#2FA7A0,stroke-width:2px,color:#0B1F2A;
-classDef cmic_layer fill:#E3F4F1,stroke:#2FA7A0,stroke-width:1.5px,color:#0B1F2A;
-classDef cmic_title fill:#0E3A63,stroke:#0E3A63,stroke-width:1px,color:#FFFFFF;
-classDef cmic_body fill:#FFFFFF,stroke:#2FA7A0,stroke-width:1px,color:#22303A;
-classDef cmic_pill fill:#0E3A63,stroke:#0E3A63,stroke-width:1px,color:#FFFFFF;
-classDef cmic_sep fill:transparent,stroke:#B6C2CC,stroke-width:1px,color:transparent;
-
-subgraph CMIC["架构图（CMIC风格）"]
-  direction TB
-
-  subgraph L1["1️⃣ 应用层（Application Layer）"]
-    direction LR
-    A1["用户交互型智能体"]:::cmic_body
-    A2["场景任务型智能体"]:::cmic_body
-    A3["安全与治理型智能体"]:::cmic_body
-  end
-
-  S1[" "]:::cmic_sep
-  L1 -.-> S1
-
-  subgraph L2["2️⃣ 智能体服务层（Agent Service Layer）"]
-    direction TB
-    P1["消息智能体平台"]:::cmic_pill
-    P2["行业智能体平台"]:::cmic_pill
-    P3["企业 AI 中台"]:::cmic_pill
-    C1["多智能体协同与编排"]:::cmic_body
-    C2["多模型接入与调度"]:::cmic_body
-    C3["知识体系能力"]:::cmic_body
-  end
-
-  S2[" "]:::cmic_sep
-  L2 -.-> S2
-
-  subgraph L3["3️⃣ 调度与运行层（Orchestration Layer）"]
-    direction LR
-    O1["请求路由与策略调度"]:::cmic_body
-    O2["消息/事件驱动"]:::cmic_body
-    O3["生态与第三方接入"]:::cmic_body
-  end
-
-  S3[" "]:::cmic_sep
-  L3 -.-> S3
-
-  subgraph L4["4️⃣ 基础支撑层（Foundation Layer）"]
-    direction LR
-    F1["身份与权限管理"]:::cmic_body
-    F2["安全与合规能力"]:::cmic_body
-    F3["协议与协作标准"]:::cmic_body
-  end
-end
-
-style CMIC fill:#EFF9F7,stroke:#2FA7A0,stroke-width:2px
-style L1 fill:#E3F4F1,stroke:#2FA7A0,stroke-width:1.5px
-style L2 fill:#E3F4F1,stroke:#2FA7A0,stroke-width:1.5px
-style L3 fill:#E3F4F1,stroke:#2FA7A0,stroke-width:1.5px
-style L4 fill:#E3F4F1,stroke:#2FA7A0,stroke-width:1.5px
-
-linkStyle 0 stroke:#B6C2CC,stroke-width:1px,stroke-dasharray:4 3
-linkStyle 1 stroke:#B6C2CC,stroke-width:1px,stroke-dasharray:4 3
-linkStyle 2 stroke:#B6C2CC,stroke-width:1px,stroke-dasharray:4 3
 `,
 }
 
@@ -774,6 +1021,15 @@ onMounted(async () => {
   await refreshLlm()
   await refreshDb()
   llmModeAutoApplyEnabled = true
+
+  // draw.io: load last diagram from storage, fallback to blank
+  drawioXml.value = loadTextFromStorage(STORAGE_KEYS.drawioXml, drawioBlankXml)
+
+  window.addEventListener('message', onDrawioMessage)
+})
+
+onBeforeUnmount(() => {
+  window.removeEventListener('message', onDrawioMessage)
 })
 
 watch(statusPanelCollapsed, (v) => saveBoolToStorage(STORAGE_KEYS.statusPanelCollapsed, v))
@@ -1004,7 +1260,7 @@ async function loadArtifact(id: string) {
         </el-card>
 
         <el-tabs v-model="activeTab" class="tabs">
-          <el-tab-pane label="自动出图" name="diagram">
+          <el-tab-pane label="自动出图（mermaid）" name="diagram">
             <el-row :gutter="16">
               <el-col :span="10">
                 <el-form label-position="top">
@@ -1013,7 +1269,6 @@ async function loadArtifact(id: string) {
                       <el-option label="流程图" value="flow" />
                       <el-option label="时序图" value="sequence" />
                       <el-option label="状态图" value="state" />
-                      <el-option label="架构图（CMIC风格）" value="cmic_report" />
                     </el-select>
                   </el-form-item>
                   <el-form-item label="描述文本">
@@ -1050,6 +1305,95 @@ async function loadArtifact(id: string) {
                 </el-card>
               </el-col>
             </el-row>
+          </el-tab-pane>
+
+          <el-tab-pane label="架构图（draw.io）" name="drawio">
+            <el-card shadow="never" class="mb">
+              <template #header>
+                <div style="display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap">
+                  <span>嵌入式 draw.io 编辑器（diagrams.net）</span>
+                  <div style="display: flex; align-items: center; gap: 8px; flex-wrap: wrap">
+                    <el-tag size="small" :type="drawioReady ? 'success' : 'warning'">
+                      {{ drawioReady ? 'ready' : 'loading' }}
+                    </el-tag>
+                    <el-tag v-if="drawioStatus" size="small" type="info">{{ drawioStatus }}</el-tag>
+                    <el-button size="small" :disabled="!drawioReady" :loading="drawioBusy" @click="onDrawioSaveClick">
+                      保存
+                    </el-button>
+                    <el-button size="small" :disabled="!drawioReady" :loading="drawioBusy" @click="resetDrawioToMock">
+                      重置示例
+                    </el-button>
+
+                    <label>
+                      <input
+                        type="file"
+                        accept=".drawio,.xml"
+                        style="display: none"
+                        @change="onDrawioFileInputChange"
+                      />
+                      <el-button size="small" :disabled="!drawioReady" :loading="drawioBusy">导入</el-button>
+                    </label>
+
+                    <el-button size="small" :disabled="!drawioReady" :loading="drawioBusy" @click="exportDrawioXmlFile">
+                      导出 .drawio
+                    </el-button>
+                    <el-button size="small" :disabled="!drawioReady" :loading="drawioBusy" @click="() => exportDrawio('png')">
+                      导出 PNG
+                    </el-button>
+                    <el-button size="small" :disabled="!drawioReady" :loading="drawioBusy" @click="() => exportDrawio('pdf')">
+                      导出 PDF
+                    </el-button>
+                    <el-button size="small" :disabled="!drawioReady" :loading="drawioBusy" @click="exportDrawioJson">
+                      导出 JSON
+                    </el-button>
+                  </div>
+                </div>
+              </template>
+
+              <el-alert
+                v-if="drawioError"
+                type="error"
+                :title="drawioError"
+                show-icon
+                class="mb"
+              />
+
+              <el-alert
+                type="info"
+                title="说明：此编辑器通过 https://embed.diagrams.net 以 iframe 方式嵌入；需可访问外网。导出 PNG/PDF 在本地完成，JSON 为包含 draw.io XML 的封装格式。"
+                show-icon
+                :closable="false"
+              />
+
+              <el-form label-position="top" class="mt">
+                <el-form-item label="前置步骤：描述 → 大模型 → draw.io XML">
+                  <el-input
+                    v-model="drawioGenText"
+                    type="textarea"
+                    :rows="4"
+                    placeholder="例如：我们有 Web/H5、App、小程序；通过 API Gateway 进入用户/订单/消息服务；用 MySQL+Redis+Kafka；需要可观测性…"
+                  />
+                </el-form-item>
+                <el-button
+                  type="primary"
+                  size="small"
+                  :disabled="!drawioReady"
+                  :loading="drawioGenLoading"
+                  @click="onGenerateDrawioFromText"
+                >
+                  生成并载入
+                </el-button>
+              </el-form>
+            </el-card>
+
+            <iframe
+              ref="drawioFrame"
+              class="drawioFrame"
+              :src="drawioEmbedUrl"
+              title="draw.io editor"
+              loading="lazy"
+              referrerpolicy="no-referrer"
+            />
           </el-tab-pane>
 
           <el-tab-pane label="接入方案" name="integration">
@@ -1455,5 +1799,13 @@ async function loadArtifact(id: string) {
 .mermaid :deep(svg) {
   max-width: 100%;
   height: auto;
+}
+
+.drawioFrame {
+  width: 100%;
+  height: 720px;
+  border: 1px solid var(--el-border-color-lighter);
+  border-radius: var(--el-border-radius-base);
+  background: var(--el-bg-color);
 }
 </style>

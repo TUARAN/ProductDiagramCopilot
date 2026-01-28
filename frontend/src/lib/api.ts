@@ -1,4 +1,4 @@
-export type DiagramType = 'flow' | 'sequence' | 'state' | 'cmic_report'
+export type DiagramType = 'flow' | 'sequence' | 'state'
 
 export interface DiagramGenerateRequest {
   diagram_type: DiagramType
@@ -9,6 +9,14 @@ export interface DiagramGenerateRequest {
 export interface DiagramGenerateResponse {
   spec: unknown
   mermaid: string
+}
+
+export interface DrawioXmlGenerateRequest {
+  text: string
+}
+
+export interface DrawioXmlGenerateResponse {
+  xml: string
 }
 
 export interface IntegrationGenerateRequest {
@@ -137,6 +145,13 @@ async function http<T>(path: string, init: RequestInit): Promise<T> {
 
 export function generateDiagram(req: DiagramGenerateRequest) {
   return http<DiagramGenerateResponse>('/api/diagram/generate', {
+    method: 'POST',
+    body: JSON.stringify(req),
+  })
+}
+
+export function generateDrawioXml(req: DrawioXmlGenerateRequest) {
+  return http<DrawioXmlGenerateResponse>('/api/diagram/drawio-xml', {
     method: 'POST',
     body: JSON.stringify(req),
   })

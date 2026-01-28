@@ -2,18 +2,24 @@ from __future__ import annotations
 
 import json
 import re
+import xml.etree.ElementTree as ET
 
 from typing import Optional
 
 from pydantic import ValidationError
 
-from app.generator.diagram import DiagramGenerateRequest, DiagramGenerateResponse
+from app.generator.diagram import (
+    DiagramGenerateRequest,
+    DiagramGenerateResponse,
+    DrawioXmlGenerateRequest,
+    DrawioXmlGenerateResponse,
+)
 from app.generator.integration import IntegrationGenerateRequest, IntegrationGenerateResponse
-from app.generator.spec import CmicReportSpec, FlowSpec, SequenceSpec, StateSpec
+from app.generator.spec import FlowSpec, SequenceSpec, StateSpec
 from app.llm.factory import get_provider
-from app.llm.prompts import diagram_prompt, integration_prompt
+from app.llm.prompts import diagram_prompt, drawio_xml_prompt, integration_prompt
 from app.llm.types import LLMChatRequest
-from app.renderer.mermaid import render_cmic_report, render_flow, render_sequence, render_state
+from app.renderer.mermaid import render_flow, render_sequence, render_state
 
 
 def _extract_first_json_object(text: str) -> Optional[str]:
@@ -100,6 +106,54 @@ def _fallback_flow_spec_from_text(text: str) -> dict:
     }
 
 
+def _extract_first_mxfile_xml(text: str) -> Optional[str]:
+    """Extract first <mxfile>...</mxfile> block from a possibly wrapped LLM response."""
+
+    t = (text or "").strip()
+    if not t:
+        return None
+
+    start = t.find("<mxfile")
+    if start < 0:
+        return None
+    end = t.find("</mxfile>", start)
+    if end < 0:
+        return None
+    end += len("</mxfile>")
+    return t[start:end].strip()
+
+
+def _validate_mxfile_xml(xml: str) -> None:
+    x = (xml or "").strip()
+    if not x:
+        raise ValueError("draw.io XML 为空")
+    if len(x) > 400_000:
+        raise ValueError("draw.io XML 过大")
+
+    try:
+        root = ET.fromstring(x)
+    except Exception as e:
+        raise ValueError(f"draw.io XML 解析失败: {e}")
+
+    if root.tag != "mxfile":
+        raise ValueError("draw.io XML 根节点必须是 mxfile")
+    if not list(root.findall("diagram")):
+        raise ValueError("draw.io XML 必须包含 diagram")
+
+
+_FALLBACK_MXFILE_XML = (
+    '<mxfile host="app.diagrams.net" modified="2026-01-28T00:00:00.000Z" agent="ProductDiagramCopilot" version="22.1.0">'
+    '<diagram id="generated" name="Generated">'
+    '<mxGraphModel dx="1200" dy="800" grid="1" gridSize="10" guides="1" tooltips="1" connect="1" arrows="1" fold="1" page="1" pageScale="1" pageWidth="1600" pageHeight="900" math="0" shadow="0">'
+    '<root><mxCell id="0"/><mxCell id="1" parent="0"/>'
+    '<mxCell id="t1" value="通用系统架构（待完善）" style="text;html=1;align=center;verticalAlign=middle;fontSize=22;fontStyle=1;" vertex="1" parent="1">'
+    '<mxGeometry x="420" y="20" width="760" height="40" as="geometry"/></mxCell>'
+    '<mxCell id="n1" value="待确认：请补充系统角色/模块/数据存储/调用链路" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FFFFFF;strokeColor=#666666;" vertex="1" parent="1">'
+    '<mxGeometry x="300" y="140" width="1000" height="120" as="geometry"/></mxCell>'
+    '</root></mxGraphModel></diagram></mxfile>'
+)
+
+
 def generate_diagram(req: DiagramGenerateRequest) -> DiagramGenerateResponse:
     provider = get_provider()
     messages = diagram_prompt(req.diagram_type, req.text, req.scene)
@@ -133,10 +187,6 @@ def generate_diagram(req: DiagramGenerateRequest) -> DiagramGenerateResponse:
     elif t == "state":
         spec = StateSpec.model_validate(spec_obj)
         mermaid = render_state(spec)
-    elif t == "cmic_report":
-        # Fixed structure template + LLM-filled placeholders.
-        spec = CmicReportSpec.model_validate(spec_obj)
-        mermaid = render_cmic_report(spec)
     else:
         raise ValueError(f"Unsupported spec.type: {t}")
 
@@ -154,3 +204,28 @@ def generate_integration_plan(req: IntegrationGenerateRequest) -> IntegrationGen
 
     resp = anyio.run(_run)
     return IntegrationGenerateResponse(markdown=resp.content)
+
+
+def generate_drawio_xml(req: DrawioXmlGenerateRequest) -> DrawioXmlGenerateResponse:
+    text = (req.text or "").strip()
+    if not text:
+        raise ValueError("text 不能为空")
+
+    provider = get_provider()
+    messages = drawio_xml_prompt(text)
+
+    import anyio
+
+    async def _run():
+        # XML may be longer than JSON specs.
+        return await provider.chat(LLMChatRequest(messages=messages, max_tokens=4096))
+
+    resp = anyio.run(_run)
+    raw = (resp.content or "").strip()
+    xml = _extract_first_mxfile_xml(raw)
+    if not xml:
+        # Some providers may ignore instructions; keep UX functional.
+        xml = _FALLBACK_MXFILE_XML
+
+    _validate_mxfile_xml(xml)
+    return DrawioXmlGenerateResponse(xml=xml)
