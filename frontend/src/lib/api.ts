@@ -1,4 +1,4 @@
-export type DiagramType = 'flow' | 'sequence' | 'state'
+export type DiagramType = 'flow' | 'sequence' | 'state' | 'cmic_report'
 
 export interface DiagramGenerateRequest {
   diagram_type: DiagramType

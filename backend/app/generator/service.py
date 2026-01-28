@@ -9,11 +9,11 @@ from pydantic import ValidationError
 
 from app.generator.diagram import DiagramGenerateRequest, DiagramGenerateResponse
 from app.generator.integration import IntegrationGenerateRequest, IntegrationGenerateResponse
-from app.generator.spec import FlowSpec, SequenceSpec, StateSpec
+from app.generator.spec import CmicReportSpec, FlowSpec, SequenceSpec, StateSpec
 from app.llm.factory import get_provider
 from app.llm.prompts import diagram_prompt, integration_prompt
 from app.llm.types import LLMChatRequest
-from app.renderer.mermaid import render_flow, render_sequence, render_state
+from app.renderer.mermaid import render_cmic_report, render_flow, render_sequence, render_state
 
 
 def _extract_first_json_object(text: str) -> Optional[str]:
@@ -133,6 +133,10 @@ def generate_diagram(req: DiagramGenerateRequest) -> DiagramGenerateResponse:
     elif t == "state":
         spec = StateSpec.model_validate(spec_obj)
         mermaid = render_state(spec)
+    elif t == "cmic_report":
+        # Fixed structure template + LLM-filled placeholders.
+        spec = CmicReportSpec.model_validate(spec_obj)
+        mermaid = render_cmic_report(spec)
     else:
         raise ValueError(f"Unsupported spec.type: {t}")
 

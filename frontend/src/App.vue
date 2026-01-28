@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { computed, onMounted, ref, watch } from 'vue'
 import * as echarts from 'echarts'
+import { Loading } from '@element-plus/icons-vue'
 
 import {
   dbPing,
@@ -267,6 +268,16 @@ const llmSteps = computed<StepItem[]>(() => {
   ]
 })
 
+// Active step for the pipeline UI (Element Plus Steps)
+// We use a 1-based index here and set it to (steps.length + 1) when finished.
+const llmStepActive = ref(7)
+
+function setLlmStepActive(step: number) {
+  const total = llmSteps.value.length + 1
+  const next = Math.max(1, Math.min(step, total))
+  llmStepActive.value = next
+}
+
 function sleep(ms: number) {
   return new Promise((resolve) => setTimeout(resolve, ms))
 }
@@ -292,6 +303,291 @@ const diagramLoading = ref(false)
 const diagramError = ref('')
 const diagramAsync = ref(true)
 const diagramLocalTimeSec = ref<number | null>(null)
+
+// Page-level loading (fullscreen)
+const pageLoading = ref(false)
+const pageLoadingMessage = ref('正在准备…')
+const pageLoadingContext = ref<'switch' | 'generate' | null>(null)
+let pageLoadingTimer: number | null = null
+let pageLoadingMessageIndex = 0
+
+function startPageLoading(context: 'switch' | 'generate') {
+  pageLoadingContext.value = context
+  pageLoading.value = true
+}
+
+function stopPageLoading() {
+  pageLoading.value = false
+  pageLoadingContext.value = null
+}
+
+watch(
+  pageLoading,
+  (isLoading) => {
+    if (pageLoadingTimer !== null) {
+      window.clearInterval(pageLoadingTimer)
+      pageLoadingTimer = null
+    }
+    if (!isLoading) return
+
+    pageLoadingMessageIndex = 0
+    const messagesByContext: Record<'switch' | 'generate', string[]> = {
+      switch: [
+        '正在切换图类型…',
+        '正在理解默认描述文本…',
+        '正在调用大模型生成模式图示…',
+        '正在渲染 Mermaid…',
+        '已经很努力在执行了，请稍等…',
+      ],
+      generate: [
+        '正在生成图…',
+        '正在调用大模型整理结构…',
+        '正在生成 Mermaid 源码…',
+        '正在渲染 SVG…',
+        '已经很努力在执行了，请稍等…',
+      ],
+    }
+
+    const getMessages = () => {
+      const ctx = pageLoadingContext.value
+      return ctx ? messagesByContext[ctx] : messagesByContext.generate
+    }
+
+    const msgs = getMessages()
+    pageLoadingMessage.value = msgs[0] || '加载中…'
+
+    pageLoadingTimer = window.setInterval(() => {
+      const current = getMessages()
+      if (!current.length) return
+      pageLoadingMessageIndex = (pageLoadingMessageIndex + 1) % current.length
+      pageLoadingMessage.value = current[pageLoadingMessageIndex] ?? '加载中…'
+    }, 1200)
+  },
+  { immediate: true }
+)
+
+const diagramDefaultTextByType: Record<DiagramType, string> = {
+  flow: '用户提交退款申请 -> 系统校验 -> 进入人工审核 -> 审核通过则发起打款 -> 更新退款状态 -> 通知用户',
+  sequence: '用户在 App 下单并支付；订单系统调用库存系统锁定库存；支付系统回调订单系统确认支付；订单系统通知用户下单成功。',
+  state: '一个订单从创建到完成：创建(待支付) -> 已支付 -> 已发货 -> 已完成；支付失败或超时进入已取消；退款进入已退款。',
+  cmic_report: `✅【通用版】企业级智能体平台架构图绘制指令
+
+你是一名 企业级 AI 平台架构图设计专家，擅长将复杂系统抽象为 可汇报、可扩展、可复用 的平台架构示意图。
+
+请绘制一张「智能体平台总体架构图」，要求：
+- 扁平化企业级风格，主色调蓝色系，辅助浅绿色/浅灰
+- 自上而下分层架构，每层是浅色容器，层名称清晰
+- 强调平台能力，不出现代码/实现细节/具体产品品牌名
+
+分层（从上到下）：
+1) 应用层：用户交互型/场景任务型/安全治理型/可扩展入口（可按行业：政务/金融/通信/内容；按对象：ToB/ToC/内部员工）
+2) 智能体服务层：协同编排/认知决策/知识体系/多模型调度/组件能力池/画像标签/插件货架
+3) 调度与运行层：路由调度/业务接入适配/消息事件驱动/生态第三方接入
+4) 基础支撑层：身份权限/注册发现授权/安全合规/协议标准
+
+只需要替换：图标题、平台命名短语、各层模块文案，其余结构固定。`,
+}
+
+const diagramSampleMermaidFallbackByType: Record<DiagramType, string> = {
+  flow: `flowchart TD
+  A[开始] --> B[校验输入]
+  B --> C[处理]
+  C --> D[结束]
+`,
+  sequence: `sequenceDiagram
+  participant U as 用户
+  participant S as 系统
+  U->>S: 发起请求
+  S-->>U: 返回结果
+`,
+  state: `stateDiagram-v2
+  [*] --> Idle
+  Idle --> Processing: start
+  Processing --> Done: finish
+  Done --> [*]
+`,
+  cmic_report: `%%{init: {"flowchart": {"curve": "linear"}} }%%
+flowchart TB
+
+classDef cmic_outer fill:#EFF9F7,stroke:#2FA7A0,stroke-width:2px,color:#0B1F2A;
+classDef cmic_layer fill:#E3F4F1,stroke:#2FA7A0,stroke-width:1.5px,color:#0B1F2A;
+classDef cmic_title fill:#0E3A63,stroke:#0E3A63,stroke-width:1px,color:#FFFFFF;
+classDef cmic_body fill:#FFFFFF,stroke:#2FA7A0,stroke-width:1px,color:#22303A;
+classDef cmic_pill fill:#0E3A63,stroke:#0E3A63,stroke-width:1px,color:#FFFFFF;
+classDef cmic_sep fill:transparent,stroke:#B6C2CC,stroke-width:1px,color:transparent;
+
+subgraph CMIC["架构图（CMIC风格）"]
+  direction TB
+
+  subgraph L1["1️⃣ 应用层（Application Layer）"]
+    direction LR
+    A1["用户交互型智能体"]:::cmic_body
+    A2["场景任务型智能体"]:::cmic_body
+    A3["安全与治理型智能体"]:::cmic_body
+  end
+
+  S1[" "]:::cmic_sep
+  L1 -.-> S1
+
+  subgraph L2["2️⃣ 智能体服务层（Agent Service Layer）"]
+    direction TB
+    P1["消息智能体平台"]:::cmic_pill
+    P2["行业智能体平台"]:::cmic_pill
+    P3["企业 AI 中台"]:::cmic_pill
+    C1["多智能体协同与编排"]:::cmic_body
+    C2["多模型接入与调度"]:::cmic_body
+    C3["知识体系能力"]:::cmic_body
+  end
+
+  S2[" "]:::cmic_sep
+  L2 -.-> S2
+
+  subgraph L3["3️⃣ 调度与运行层（Orchestration Layer）"]
+    direction LR
+    O1["请求路由与策略调度"]:::cmic_body
+    O2["消息/事件驱动"]:::cmic_body
+    O3["生态与第三方接入"]:::cmic_body
+  end
+
+  S3[" "]:::cmic_sep
+  L3 -.-> S3
+
+  subgraph L4["4️⃣ 基础支撑层（Foundation Layer）"]
+    direction LR
+    F1["身份与权限管理"]:::cmic_body
+    F2["安全与合规能力"]:::cmic_body
+    F3["协议与协作标准"]:::cmic_body
+  end
+end
+
+style CMIC fill:#EFF9F7,stroke:#2FA7A0,stroke-width:2px
+style L1 fill:#E3F4F1,stroke:#2FA7A0,stroke-width:1.5px
+style L2 fill:#E3F4F1,stroke:#2FA7A0,stroke-width:1.5px
+style L3 fill:#E3F4F1,stroke:#2FA7A0,stroke-width:1.5px
+style L4 fill:#E3F4F1,stroke:#2FA7A0,stroke-width:1.5px
+
+linkStyle 0 stroke:#B6C2CC,stroke-width:1px,stroke-dasharray:4 3
+linkStyle 1 stroke:#B6C2CC,stroke-width:1px,stroke-dasharray:4 3
+linkStyle 2 stroke:#B6C2CC,stroke-width:1px,stroke-dasharray:4 3
+`,
+}
+
+let diagramSampleToken = 0
+let diagramTypeWatchInitialized = false
+
+type ApplySampleOptions = {
+  /** First render on page load: do not show fullscreen loading */
+  initial?: boolean
+  /** If true, try backend/LLM generation; otherwise only local fallback */
+  preferBackend?: boolean
+}
+
+async function applyDiagramSample(type: DiagramType, options: ApplySampleOptions = {}) {
+  const token = ++diagramSampleToken
+  diagramError.value = ''
+  diagramLocalTimeSec.value = null
+  const isInitial = Boolean(options.initial)
+  const preferBackend = options.preferBackend !== false
+
+  // 1) Always set a default text prompt for this diagram type.
+  diagramText.value = diagramDefaultTextByType[type] || diagramDefaultTextByType.flow
+
+  // Initial page entry: do NOT show fullscreen loading.
+  if (isInitial) {
+    setLlmStepActive(7)
+    const fallback =
+      diagramSampleMermaidFallbackByType[type] || diagramSampleMermaidFallbackByType.flow
+    diagramMermaid.value = fallback
+    try {
+      const svg = await renderMermaid(`sample-${type}-${Date.now()}`, fallback)
+      if (token !== diagramSampleToken) return
+      diagramSvg.value = svg
+    } catch {
+      if (token !== diagramSampleToken) return
+      diagramSvg.value = ''
+    }
+
+    if (!preferBackend) return
+
+    // Optional silent refresh via backend/LLM (no fullscreen overlay).
+    try {
+      const res = await generateDiagram({
+        diagram_type: type,
+        text: diagramText.value,
+        scene: 'product',
+      })
+      if (token !== diagramSampleToken) return
+      diagramMermaid.value = res.mermaid
+      diagramSvg.value = res.mermaid
+        ? await renderMermaid(`sample-${type}-${Date.now()}`, res.mermaid)
+        : ''
+    } catch {
+      // ignore (keep local)
+    }
+    return
+  }
+
+  // User-initiated switch: show fullscreen loading until backend completes (fallback on error).
+  startPageLoading('switch')
+  setLlmStepActive(1)
+
+  if (!preferBackend) {
+    // If backend is disabled, just show local fallback.
+    const fallback =
+      diagramSampleMermaidFallbackByType[type] || diagramSampleMermaidFallbackByType.flow
+    diagramMermaid.value = fallback
+    try {
+      setLlmStepActive(5)
+      const svg = await renderMermaid(`sample-${type}-${Date.now()}`, fallback)
+      if (token !== diagramSampleToken) return
+      diagramSvg.value = svg
+      setLlmStepActive(6)
+      setLlmStepActive(7)
+    } catch {
+      if (token !== diagramSampleToken) return
+      diagramSvg.value = ''
+    } finally {
+      if (token === diagramSampleToken) stopPageLoading()
+    }
+    return
+  }
+
+  try {
+    setLlmStepActive(2)
+    setLlmStepActive(3)
+    const res = await generateDiagram({
+      diagram_type: type,
+      text: diagramText.value,
+      scene: 'product',
+    })
+    if (token !== diagramSampleToken) return
+    setLlmStepActive(4)
+    diagramMermaid.value = res.mermaid
+    setLlmStepActive(5)
+    diagramSvg.value = res.mermaid
+      ? await renderMermaid(`sample-${type}-${Date.now()}`, res.mermaid)
+      : ''
+    setLlmStepActive(6)
+    setLlmStepActive(7)
+  } catch {
+    const fallback =
+      diagramSampleMermaidFallbackByType[type] || diagramSampleMermaidFallbackByType.flow
+    diagramMermaid.value = fallback
+    try {
+      setLlmStepActive(5)
+      const svg = await renderMermaid(`sample-${type}-${Date.now()}`, fallback)
+      if (token !== diagramSampleToken) return
+      diagramSvg.value = svg
+      setLlmStepActive(6)
+      setLlmStepActive(7)
+    } catch {
+      if (token !== diagramSampleToken) return
+      diagramSvg.value = ''
+    }
+  } finally {
+    if (token === diagramSampleToken) stopPageLoading()
+  }
+}
 
 // Integration
 const integrationText = ref(
@@ -345,6 +641,8 @@ async function onGenerateDiagram() {
   diagramMermaid.value = ''
   diagramLocalTimeSec.value = null
   diagramLoading.value = true
+  startPageLoading('generate')
+  setLlmStepActive(1)
   try {
     const payload = {
       diagram_type: diagramType.value,
@@ -353,28 +651,52 @@ async function onGenerateDiagram() {
     } as const
 
     if (diagramAsync.value) {
+      setLlmStepActive(2)
       const submit = await submitDiagramTask(payload)
+      setLlmStepActive(3)
       const status = await waitTask(submit.task_id)
       const result = (status.result ?? {}) as Record<string, unknown>
       if (status.state === 'FAILURE') {
         throw new Error(String(result.error ?? 'Task failed'))
       }
+      setLlmStepActive(4)
       const mermaid = String(result.mermaid ?? '')
       diagramMermaid.value = mermaid
+      setLlmStepActive(5)
       diagramSvg.value = mermaid ? await renderMermaid(`m-${Date.now()}`, mermaid) : ''
+      setLlmStepActive(6)
     } else {
+      setLlmStepActive(2)
+      setLlmStepActive(3)
       const res = await generateDiagram(payload)
+      setLlmStepActive(4)
       diagramMermaid.value = res.mermaid
+      setLlmStepActive(5)
       diagramSvg.value = await renderMermaid(`m-${Date.now()}`, res.mermaid)
+      setLlmStepActive(6)
     }
 
     diagramLocalTimeSec.value = (performance.now() - startedAt) / 1000
   } catch (e) {
     diagramError.value = e instanceof Error ? e.message : String(e)
   } finally {
+    setLlmStepActive(7)
     diagramLoading.value = false
+    stopPageLoading()
   }
 }
+
+watch(
+  diagramType,
+  (t) => {
+    // On initial page load: do not show fullscreen loading.
+    // On user-initiated switch: show fullscreen loading and refresh via backend.
+    const isInitial = !diagramTypeWatchInitialized
+    diagramTypeWatchInitialized = true
+    void applyDiagramSample(t, { initial: isInitial, preferBackend: true })
+  },
+  { immediate: true }
+)
 
 async function onGenerateIntegration() {
   integrationError.value = ''
@@ -489,6 +811,12 @@ async function loadArtifact(id: string) {
 
 <template>
   <div class="app">
+    <div v-show="pageLoading" class="el-loading-mask is-fullscreen">
+      <div class="el-loading-spinner">
+        <el-icon class="is-loading" :size="32"><Loading /></el-icon>
+        <p class="el-loading-text">{{ pageLoadingMessage }}</p>
+      </div>
+    </div>
     <el-container style="height: 100vh">
       <el-header class="header">
         <div class="brand">
@@ -535,6 +863,22 @@ async function loadArtifact(id: string) {
               </div>
             </div>
           </template>
+
+          <div v-show="statusPanelCollapsed" class="statusStepsCollapsed">
+            <el-steps
+              :active="llmStepActive"
+              align-center
+              process-status="success"
+              finish-status="success"
+              class="steps steps--compact"
+            >
+              <el-step
+                v-for="s in llmSteps"
+                :key="`${s.title}::collapsed`"
+                :title="s.title"
+              />
+            </el-steps>
+          </div>
 
           <div v-show="!statusPanelCollapsed">
             <el-alert
@@ -634,7 +978,7 @@ async function loadArtifact(id: string) {
 
               <el-col :span="14">
                 <el-steps
-                  :active="llmSteps.length + 1"
+                  :active="llmStepActive"
                   align-center
                   process-status="success"
                   finish-status="success"
@@ -669,6 +1013,7 @@ async function loadArtifact(id: string) {
                       <el-option label="流程图" value="flow" />
                       <el-option label="时序图" value="sequence" />
                       <el-option label="状态图" value="state" />
+                      <el-option label="架构图（CMIC风格）" value="cmic_report" />
                     </el-select>
                   </el-form-item>
                   <el-form-item label="描述文本">
@@ -847,6 +1192,28 @@ async function loadArtifact(id: string) {
   isolation: isolate;
 }
 
+/* Page-level fullscreen loading overlay: force true center alignment */
+.app :deep(.el-loading-mask.is-fullscreen) {
+  position: fixed !important;
+  inset: 0 !important;
+  /* IMPORTANT: do NOT use display: ... !important here.
+     v-show relies on inline display:none to hide this element. */
+  display: flex;
+  align-items: center !important;
+  justify-content: center !important;
+}
+
+.app :deep(.el-loading-mask.is-fullscreen .el-loading-spinner) {
+  position: static !important;
+  top: auto !important;
+  left: auto !important;
+  right: auto !important;
+  bottom: auto !important;
+  transform: none !important;
+  margin-top: 0 !important;
+  text-align: center;
+}
+
 .app::before {
   content: '';
   position: absolute;
@@ -1008,6 +1375,10 @@ async function loadArtifact(id: string) {
   margin-bottom: 12px;
 }
 
+.statusStepsCollapsed {
+  margin-bottom: 8px;
+}
+
 .steps {
   margin-bottom: 12px;
   padding: 8px 10px 6px;
@@ -1017,6 +1388,20 @@ async function loadArtifact(id: string) {
   overflow: hidden;
   flex-wrap: nowrap;
   min-height: 64px;
+}
+
+.steps.steps--compact {
+  margin-bottom: 0;
+  padding: 6px 10px;
+  min-height: 44px;
+}
+
+.steps.steps--compact :deep(.el-step__description) {
+  display: none;
+}
+
+.steps.steps--compact :deep(.el-step__main) {
+  padding-bottom: 0;
 }
 
 .steps :deep(.el-step__title) {
