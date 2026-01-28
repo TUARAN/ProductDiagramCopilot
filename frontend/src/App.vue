@@ -1,16 +1,21 @@
 <script setup lang="ts">
-import { computed, onMounted, ref, watch } from 'vue'
+import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import * as echarts from 'echarts'
+import { Loading } from '@element-plus/icons-vue'
+import { jsPDF } from 'jspdf'
 
 import {
   dbPing,
   generateDiagram,
+  generateDrawioXml,
   generateIntegration,
   getArtifact,
   getTaskStatus,
+  getLlmConfig,
   llmPing,
   listArtifacts,
   settlementMetrics,
+  setLlmConfig,
   submitDiagramTask,
   submitIntegrationTask,
   type DiagramType,
@@ -20,10 +25,13 @@ import {
 } from './lib/api'
 import { renderMermaid } from './lib/mermaid'
 
-const activeTab = ref<'diagram' | 'integration' | 'settlement' | 'artifacts'>('diagram')
+import drawioBlankXml from './assets/drawio-blank.drawio?raw'
+
+const activeTab = ref<'diagram' | 'drawio' | 'integration' | 'settlement' | 'artifacts'>('diagram')
 
 const STORAGE_KEYS = {
   statusPanelCollapsed: 'pdc:statusPanelCollapsed',
+  drawioXml: 'pdc:drawioXml',
 } as const
 
 const statusPanelCollapsed = ref(false)
@@ -46,10 +54,345 @@ function saveBoolToStorage(key: string, value: boolean) {
   }
 }
 
+// draw.io (diagrams.net) embedded editor
+type DrawioExportKind = 'png' | 'pdf'
+
+const drawioFrame = ref<HTMLIFrameElement | null>(null)
+const drawioReady = ref(false)
+const drawioError = ref('')
+const drawioStatus = ref('')
+const drawioBusy = ref(false)
+const drawioXml = ref('')
+let drawioPendingSave: ((xml: string) => void) | null = null
+let drawioPendingExport: DrawioExportKind | null = null
+
+const drawioGenText = ref('')
+const drawioGenLoading = ref(false)
+
+const drawioEmbedUrl = computed(() => {
+  const params = new URLSearchParams({
+    embed: '1',
+    proto: 'json',
+    spin: '1',
+    libraries: '1',
+    noExitBtn: '1',
+    ui: 'min',
+    lang: 'zh',
+  })
+  return `https://embed.diagrams.net/?${params.toString()}`
+})
+
+function onDrawioMessage(ev: MessageEvent) {
+  if (ev.origin !== 'https://embed.diagrams.net') return
+  const msg = parseDrawioMessage(ev.data)
+  if (!msg) return
+
+  if (msg.error) {
+    drawioError.value = String(msg.error)
+    drawioBusy.value = false
+    drawioPendingExport = null
+    return
+  }
+
+  if (msg.event === 'init') {
+    drawioReady.value = true
+    loadDrawio(drawioXml.value || drawioBlankXml)
+    return
+  }
+
+  if (msg.event === 'load') {
+    drawioStatus.value = '已加载'
+    return
+  }
+
+  if (msg.event === 'autosave' || msg.event === 'save') {
+    const xml = typeof msg.xml === 'string' ? msg.xml : ''
+    if (xml) {
+      drawioXml.value = xml
+      saveTextToStorage(STORAGE_KEYS.drawioXml, xml)
+      drawioStatus.value = msg.event === 'save' ? '已保存' : '自动保存'
+      if (drawioPendingSave) drawioPendingSave(xml)
+    }
+    return
+  }
+
+  if (msg.event === 'export') {
+    const dataUri = typeof msg.data === 'string' ? msg.data : ''
+    const pending = drawioPendingExport
+    drawioPendingExport = null
+    drawioBusy.value = false
+    if (!dataUri) {
+      drawioError.value = '导出失败（未返回 data URI）'
+      return
+    }
+
+    const date = new Date().toISOString().slice(0, 10)
+    if (pending === 'png') {
+      downloadDataUri(`drawio-${date}.png`, dataUri)
+      drawioStatus.value = '已导出 PNG'
+      return
+    }
+
+    if (pending === 'pdf') {
+      void (async () => {
+        try {
+          const img = await dataUriToImage(dataUri)
+          const orientation = img.width >= img.height ? 'landscape' : 'portrait'
+          const pdf = new jsPDF({
+            orientation,
+            unit: 'px',
+            format: [img.width, img.height],
+            compress: true,
+          })
+          pdf.addImage(dataUri, 'PNG', 0, 0, img.width, img.height)
+          pdf.save(`drawio-${date}.pdf`)
+          drawioStatus.value = '已导出 PDF'
+        } catch (e) {
+          drawioError.value = e instanceof Error ? e.message : String(e)
+        }
+      })()
+    }
+  }
+}
+
+function loadTextFromStorage(key: string, fallback: string) {
+  try {
+    const raw = localStorage.getItem(key)
+    return raw === null ? fallback : raw
+  } catch {
+    return fallback
+  }
+}
+
+function saveTextToStorage(key: string, value: string) {
+  try {
+    localStorage.setItem(key, value)
+  } catch {
+    // ignore
+  }
+}
+
+function postToDrawio(message: Record<string, unknown>) {
+  const win = drawioFrame.value?.contentWindow
+  if (!win) return
+  // Embed mode is only supported on embed.diagrams.net
+  win.postMessage(JSON.stringify(message), 'https://embed.diagrams.net')
+}
+
+function parseDrawioMessage(data: unknown): any | null {
+  if (typeof data !== 'string') return null
+  try {
+    return JSON.parse(data)
+  } catch {
+    return null
+  }
+}
+
+function loadDrawio(xml: string) {
+  if (!drawioReady.value) return
+  drawioError.value = ''
+  drawioStatus.value = '正在加载…'
+  postToDrawio({
+    action: 'load',
+    xml,
+    autosave: 1,
+    title: '架构图（draw.io）',
+  })
+}
+
+function requestDrawioSave(timeoutMs = 4000): Promise<string> {
+  if (!drawioReady.value) return Promise.reject(new Error('draw.io 未就绪'))
+  drawioError.value = ''
+  drawioStatus.value = '正在保存…'
+  drawioBusy.value = true
+  return new Promise((resolve, reject) => {
+    const timer = window.setTimeout(() => {
+      if (drawioPendingSave) drawioPendingSave = null
+      drawioBusy.value = false
+      reject(new Error('保存超时（draw.io 未返回 save 事件）'))
+    }, timeoutMs)
+
+    drawioPendingSave = (xml: string) => {
+      window.clearTimeout(timer)
+      drawioPendingSave = null
+      drawioBusy.value = false
+      resolve(xml)
+    }
+
+    postToDrawio({ action: 'save' })
+  })
+}
+
+async function ensureLatestDrawioXml() {
+  // If autosave is enabled, we likely already have XML.
+  if (drawioXml.value) return drawioXml.value
+  const xml = await requestDrawioSave()
+  return xml
+}
+
+async function onDrawioSaveClick() {
+  try {
+    await requestDrawioSave()
+  } catch (e) {
+    drawioError.value = e instanceof Error ? e.message : String(e)
+  }
+}
+
+function downloadDataUri(filename: string, dataUri: string) {
+  const a = document.createElement('a')
+  a.href = dataUri
+  a.download = filename
+  a.rel = 'noopener'
+  document.body.appendChild(a)
+  a.click()
+  a.remove()
+}
+
+function dataUriToImage(dataUri: string): Promise<HTMLImageElement> {
+  return new Promise((resolve, reject) => {
+    const img = new Image()
+    img.onload = () => resolve(img)
+    img.onerror = () => reject(new Error('无法加载导出的 PNG'))
+    img.src = dataUri
+  })
+}
+
+async function exportDrawio(kind: DrawioExportKind) {
+  if (!drawioReady.value) return
+  drawioError.value = ''
+  drawioStatus.value = '正在导出…'
+  drawioBusy.value = true
+  drawioPendingExport = kind
+  const xml = await ensureLatestDrawioXml().catch((e) => {
+    drawioBusy.value = false
+    drawioError.value = e instanceof Error ? e.message : String(e)
+    return ''
+  })
+  if (!xml) return
+
+  postToDrawio({
+    action: 'export',
+    format: 'png',
+    // Higher scale for sharper PNG/PDF
+    scale: 2,
+    transparent: true,
+    xml,
+    spin: '1',
+    message: '正在生成图片…',
+  })
+}
+
+async function exportDrawioJson() {
+  drawioError.value = ''
+  try {
+    const xml = await ensureLatestDrawioXml()
+    const payload = {
+      format: 'drawio',
+      version: 1,
+      exported_at: new Date().toISOString(),
+      xml,
+    }
+    downloadTextFile(
+      `drawio-${new Date().toISOString().slice(0, 10)}.json`,
+      JSON.stringify(payload, null, 2),
+      'application/json;charset=utf-8'
+    )
+    drawioStatus.value = '已导出 JSON'
+  } catch (e) {
+    drawioError.value = e instanceof Error ? e.message : String(e)
+  }
+}
+
+async function exportDrawioXmlFile() {
+  drawioError.value = ''
+  try {
+    const xml = await ensureLatestDrawioXml()
+    downloadTextFile(
+      `drawio-${new Date().toISOString().slice(0, 10)}.drawio`,
+      xml,
+      'application/xml;charset=utf-8'
+    )
+    drawioStatus.value = '已导出 .drawio'
+  } catch (e) {
+    drawioError.value = e instanceof Error ? e.message : String(e)
+  }
+}
+
+function resetDrawioToMock() {
+  drawioXml.value = drawioBlankXml
+  saveTextToStorage(STORAGE_KEYS.drawioXml, drawioXml.value)
+  loadDrawio(drawioXml.value)
+  drawioStatus.value = '已重置为默认模板'
+}
+
+async function onGenerateDrawioFromText() {
+  drawioError.value = ''
+
+  const text = (drawioGenText.value || '').trim()
+  if (!text) {
+    drawioError.value = '请先输入描述文本'
+    return
+  }
+  if (drawioGenLoading.value || drawioBusy.value) return
+
+  drawioGenLoading.value = true
+  try {
+    const resp = await generateDrawioXml({ text })
+    const xml = (resp?.xml || '').trim()
+    if (!xml) throw new Error('生成失败（未返回 XML）')
+
+    drawioXml.value = xml
+    saveTextToStorage(STORAGE_KEYS.drawioXml, drawioXml.value)
+
+    // If iframe already initialized, load immediately. Otherwise it will load on init.
+    if (drawioReady.value) loadDrawio(drawioXml.value)
+    drawioStatus.value = '已根据描述生成并加载'
+  } catch (e) {
+    drawioError.value = e instanceof Error ? e.message : String(e)
+  } finally {
+    drawioGenLoading.value = false
+  }
+}
+
+async function importDrawioFile(file: File) {
+  drawioError.value = ''
+  try {
+    const text = await file.text()
+    drawioXml.value = text
+    saveTextToStorage(STORAGE_KEYS.drawioXml, drawioXml.value)
+    loadDrawio(drawioXml.value)
+    drawioStatus.value = `已导入：${file.name}`
+  } catch (e) {
+    drawioError.value = e instanceof Error ? e.message : String(e)
+  }
+}
+
+function onDrawioFileInputChange(ev: Event) {
+  const input = ev.target as HTMLInputElement
+  const file = input.files?.[0]
+  // allow selecting the same file repeatedly
+  input.value = ''
+  if (!file) return
+  void importDrawioFile(file)
+}
+
 // LLM status (visualize where we call API / local model)
 const llmLoading = ref(false)
 const llmError = ref('')
 const llm = ref<LlmPingResponse | null>(null)
+
+const llmConfigLoading = ref(false)
+const llmConfigError = ref('')
+const llmMode = ref<'ollama' | 'openai_compat'>('ollama')
+const ollamaBaseUrl = ref('http://localhost:11434')
+const ollamaModel = ref('llama3.2:1b')
+
+const ollamaPresetModels = ['llama3.2:1b', 'qwen3:4b']
+
+let llmModeAutoApplyEnabled = false
+let suppressLlmModeAutoApply = 0
+let pendingLlmMode: 'ollama' | 'openai_compat' | null = null
+let llmConfigApplyTimer: number | null = null
 
 // DB status (PostgreSQL connectivity)
 const dbLoading = ref(false)
@@ -65,6 +408,11 @@ const backendApiBase = computed(() => {
   const origin = window.location.origin
   const base = `${origin}/api`
   return isDevProxy.value ? `${base}（dev 代理）` : base
+})
+
+const backendApiProxy = computed(() => {
+  const origin = window.location.origin
+  return `${origin}/api`
 })
 
 const backendApiBaseReal = computed(() => {
@@ -83,6 +431,102 @@ async function refreshLlm() {
     llmLoading.value = false
   }
 }
+
+async function refreshLlmConfig() {
+  llmConfigLoading.value = true
+  llmConfigError.value = ''
+  suppressLlmModeAutoApply += 1
+  try {
+    const cfg = await getLlmConfig()
+    // We only expose ollama / openai_compat in the UI.
+    // If backend returns an unexpected mode, treat it as ollama (local) to avoid a dead-end UI.
+    llmMode.value = cfg.mode === 'openai_compat' ? 'openai_compat' : 'ollama'
+
+    // Auto-fill ollama settings when backend is in ollama mode.
+    // (When in openai_compat, cfg.base_url refers to gateway URL and should not overwrite ollama inputs.)
+    if (cfg.mode === 'ollama') {
+      if (cfg.base_url) ollamaBaseUrl.value = String(cfg.base_url)
+      if (cfg.model) ollamaModel.value = String(cfg.model)
+    }
+  } catch (e) {
+    llmConfigError.value = e instanceof Error ? e.message : String(e)
+  } finally {
+    suppressLlmModeAutoApply -= 1
+    llmConfigLoading.value = false
+  }
+}
+
+async function applyLlmMode(mode: 'ollama' | 'openai_compat') {
+  llmConfigLoading.value = true
+  llmConfigError.value = ''
+  try {
+    // Note: openai_compat secrets and ollama defaults are configured via env.
+    // The UI only switches the active mode.
+    await setLlmConfig(
+      mode === 'ollama'
+        ? {
+            mode,
+            ollama_base_url: ollamaBaseUrl.value.trim() || undefined,
+            ollama_model: ollamaModel.value.trim() || undefined,
+          }
+        : { mode }
+    )
+    await refreshLlmConfig()
+    await refreshLlm()
+  } catch (e) {
+    llmConfigError.value = e instanceof Error ? e.message : String(e)
+  } finally {
+    llmConfigLoading.value = false
+  }
+}
+
+function scheduleApplyLlmConfig(debounceMs = 0) {
+  if (!llmModeAutoApplyEnabled) return
+  if (suppressLlmModeAutoApply > 0) return
+
+  if (llmConfigApplyTimer !== null) {
+    window.clearTimeout(llmConfigApplyTimer)
+    llmConfigApplyTimer = null
+  }
+
+  llmConfigApplyTimer = window.setTimeout(() => {
+    llmConfigApplyTimer = null
+    pendingLlmMode = llmMode.value
+    void flushPendingLlmMode()
+  }, debounceMs)
+}
+
+async function flushPendingLlmMode() {
+  if (llmConfigLoading.value) return
+  const mode = pendingLlmMode
+  if (!mode) return
+  pendingLlmMode = null
+  await applyLlmMode(mode)
+  if (pendingLlmMode) await flushPendingLlmMode()
+}
+
+watch(
+  llmMode,
+  (mode) => {
+    if (!llmModeAutoApplyEnabled) return
+    if (suppressLlmModeAutoApply > 0) return
+    pendingLlmMode = mode
+    void flushPendingLlmMode()
+  },
+  { flush: 'post' }
+)
+
+watch(
+  [ollamaBaseUrl, ollamaModel],
+  () => {
+    if (!llmModeAutoApplyEnabled) return
+    if (suppressLlmModeAutoApply > 0) return
+    if (llmMode.value !== 'ollama') return
+    // debounce a bit while typing
+    scheduleApplyLlmConfig(300)
+  },
+  { flush: 'post' }
+)
 
 async function refreshDb() {
   dbLoading.value = true
@@ -151,6 +595,16 @@ const llmSteps = computed<StepItem[]>(() => {
   ]
 })
 
+// Active step for the pipeline UI (Element Plus Steps)
+// We use a 1-based index here and set it to (steps.length + 1) when finished.
+const llmStepActive = ref(7)
+
+function setLlmStepActive(step: number) {
+  const total = llmSteps.value.length + 1
+  const next = Math.max(1, Math.min(step, total))
+  llmStepActive.value = next
+}
+
 function sleep(ms: number) {
   return new Promise((resolve) => setTimeout(resolve, ms))
 }
@@ -175,6 +629,212 @@ const diagramSvg = ref('')
 const diagramLoading = ref(false)
 const diagramError = ref('')
 const diagramAsync = ref(true)
+const diagramLocalTimeSec = ref<number | null>(null)
+
+// Page-level loading (fullscreen)
+const pageLoading = ref(false)
+const pageLoadingMessage = ref('正在准备…')
+const pageLoadingContext = ref<'switch' | 'generate' | null>(null)
+let pageLoadingTimer: number | null = null
+let pageLoadingMessageIndex = 0
+
+function startPageLoading(context: 'switch' | 'generate') {
+  pageLoadingContext.value = context
+  pageLoading.value = true
+}
+
+function stopPageLoading() {
+  pageLoading.value = false
+  pageLoadingContext.value = null
+}
+
+watch(
+  pageLoading,
+  (isLoading) => {
+    if (pageLoadingTimer !== null) {
+      window.clearInterval(pageLoadingTimer)
+      pageLoadingTimer = null
+    }
+    if (!isLoading) return
+
+    pageLoadingMessageIndex = 0
+    const messagesByContext: Record<'switch' | 'generate', string[]> = {
+      switch: [
+        '正在切换图类型…',
+        '正在理解默认描述文本…',
+        '正在调用大模型生成模式图示…',
+        '正在渲染 Mermaid…',
+        '已经很努力在执行了，请稍等…',
+      ],
+      generate: [
+        '正在生成图…',
+        '正在调用大模型整理结构…',
+        '正在生成 Mermaid 源码…',
+        '正在渲染 SVG…',
+        '已经很努力在执行了，请稍等…',
+      ],
+    }
+
+    const getMessages = () => {
+      const ctx = pageLoadingContext.value
+      return ctx ? messagesByContext[ctx] : messagesByContext.generate
+    }
+
+    const msgs = getMessages()
+    pageLoadingMessage.value = msgs[0] || '加载中…'
+
+    pageLoadingTimer = window.setInterval(() => {
+      const current = getMessages()
+      if (!current.length) return
+      pageLoadingMessageIndex = (pageLoadingMessageIndex + 1) % current.length
+      pageLoadingMessage.value = current[pageLoadingMessageIndex] ?? '加载中…'
+    }, 1200)
+  },
+  { immediate: true }
+)
+
+const diagramDefaultTextByType: Record<DiagramType, string> = {
+  flow: '用户提交退款申请 -> 系统校验 -> 进入人工审核 -> 审核通过则发起打款 -> 更新退款状态 -> 通知用户',
+  sequence: '用户在 App 下单并支付；订单系统调用库存系统锁定库存；支付系统回调订单系统确认支付；订单系统通知用户下单成功。',
+  state: '一个订单从创建到完成：创建(待支付) -> 已支付 -> 已发货 -> 已完成；支付失败或超时进入已取消；退款进入已退款。',
+}
+
+const diagramSampleMermaidFallbackByType: Record<DiagramType, string> = {
+  flow: `flowchart TD
+  A[开始] --> B[校验输入]
+  B --> C[处理]
+  C --> D[结束]
+`,
+  sequence: `sequenceDiagram
+  participant U as 用户
+  participant S as 系统
+  U->>S: 发起请求
+  S-->>U: 返回结果
+`,
+  state: `stateDiagram-v2
+  [*] --> Idle
+  Idle --> Processing: start
+  Processing --> Done: finish
+  Done --> [*]
+`,
+}
+
+let diagramSampleToken = 0
+let diagramTypeWatchInitialized = false
+
+type ApplySampleOptions = {
+  /** First render on page load: do not show fullscreen loading */
+  initial?: boolean
+  /** If true, try backend/LLM generation; otherwise only local fallback */
+  preferBackend?: boolean
+}
+
+async function applyDiagramSample(type: DiagramType, options: ApplySampleOptions = {}) {
+  const token = ++diagramSampleToken
+  diagramError.value = ''
+  diagramLocalTimeSec.value = null
+  const isInitial = Boolean(options.initial)
+  const preferBackend = options.preferBackend !== false
+
+  // 1) Always set a default text prompt for this diagram type.
+  diagramText.value = diagramDefaultTextByType[type] || diagramDefaultTextByType.flow
+
+  // Initial page entry: do NOT show fullscreen loading.
+  if (isInitial) {
+    setLlmStepActive(7)
+    const fallback =
+      diagramSampleMermaidFallbackByType[type] || diagramSampleMermaidFallbackByType.flow
+    diagramMermaid.value = fallback
+    try {
+      const svg = await renderMermaid(`sample-${type}-${Date.now()}`, fallback)
+      if (token !== diagramSampleToken) return
+      diagramSvg.value = svg
+    } catch {
+      if (token !== diagramSampleToken) return
+      diagramSvg.value = ''
+    }
+
+    if (!preferBackend) return
+
+    // Optional silent refresh via backend/LLM (no fullscreen overlay).
+    try {
+      const res = await generateDiagram({
+        diagram_type: type,
+        text: diagramText.value,
+        scene: 'product',
+      })
+      if (token !== diagramSampleToken) return
+      diagramMermaid.value = res.mermaid
+      diagramSvg.value = res.mermaid
+        ? await renderMermaid(`sample-${type}-${Date.now()}`, res.mermaid)
+        : ''
+    } catch {
+      // ignore (keep local)
+    }
+    return
+  }
+
+  // User-initiated switch: show fullscreen loading until backend completes (fallback on error).
+  startPageLoading('switch')
+  setLlmStepActive(1)
+
+  if (!preferBackend) {
+    // If backend is disabled, just show local fallback.
+    const fallback =
+      diagramSampleMermaidFallbackByType[type] || diagramSampleMermaidFallbackByType.flow
+    diagramMermaid.value = fallback
+    try {
+      setLlmStepActive(5)
+      const svg = await renderMermaid(`sample-${type}-${Date.now()}`, fallback)
+      if (token !== diagramSampleToken) return
+      diagramSvg.value = svg
+      setLlmStepActive(6)
+      setLlmStepActive(7)
+    } catch {
+      if (token !== diagramSampleToken) return
+      diagramSvg.value = ''
+    } finally {
+      if (token === diagramSampleToken) stopPageLoading()
+    }
+    return
+  }
+
+  try {
+    setLlmStepActive(2)
+    setLlmStepActive(3)
+    const res = await generateDiagram({
+      diagram_type: type,
+      text: diagramText.value,
+      scene: 'product',
+    })
+    if (token !== diagramSampleToken) return
+    setLlmStepActive(4)
+    diagramMermaid.value = res.mermaid
+    setLlmStepActive(5)
+    diagramSvg.value = res.mermaid
+      ? await renderMermaid(`sample-${type}-${Date.now()}`, res.mermaid)
+      : ''
+    setLlmStepActive(6)
+    setLlmStepActive(7)
+  } catch {
+    const fallback =
+      diagramSampleMermaidFallbackByType[type] || diagramSampleMermaidFallbackByType.flow
+    diagramMermaid.value = fallback
+    try {
+      setLlmStepActive(5)
+      const svg = await renderMermaid(`sample-${type}-${Date.now()}`, fallback)
+      if (token !== diagramSampleToken) return
+      diagramSvg.value = svg
+      setLlmStepActive(6)
+      setLlmStepActive(7)
+    } catch {
+      if (token !== diagramSampleToken) return
+      diagramSvg.value = ''
+    }
+  } finally {
+    if (token === diagramSampleToken) stopPageLoading()
+  }
+}
 
 // Integration
 const integrationText = ref(
@@ -222,10 +882,14 @@ function onDownloadDiagramSvg() {
 }
 
 async function onGenerateDiagram() {
+  const startedAt = performance.now()
   diagramError.value = ''
   diagramSvg.value = ''
   diagramMermaid.value = ''
+  diagramLocalTimeSec.value = null
   diagramLoading.value = true
+  startPageLoading('generate')
+  setLlmStepActive(1)
   try {
     const payload = {
       diagram_type: diagramType.value,
@@ -234,23 +898,52 @@ async function onGenerateDiagram() {
     } as const
 
     if (diagramAsync.value) {
+      setLlmStepActive(2)
       const submit = await submitDiagramTask(payload)
+      setLlmStepActive(3)
       const status = await waitTask(submit.task_id)
       const result = (status.result ?? {}) as Record<string, unknown>
+      if (status.state === 'FAILURE') {
+        throw new Error(String(result.error ?? 'Task failed'))
+      }
+      setLlmStepActive(4)
       const mermaid = String(result.mermaid ?? '')
       diagramMermaid.value = mermaid
+      setLlmStepActive(5)
       diagramSvg.value = mermaid ? await renderMermaid(`m-${Date.now()}`, mermaid) : ''
+      setLlmStepActive(6)
     } else {
+      setLlmStepActive(2)
+      setLlmStepActive(3)
       const res = await generateDiagram(payload)
+      setLlmStepActive(4)
       diagramMermaid.value = res.mermaid
+      setLlmStepActive(5)
       diagramSvg.value = await renderMermaid(`m-${Date.now()}`, res.mermaid)
+      setLlmStepActive(6)
     }
+
+    diagramLocalTimeSec.value = (performance.now() - startedAt) / 1000
   } catch (e) {
     diagramError.value = e instanceof Error ? e.message : String(e)
   } finally {
+    setLlmStepActive(7)
     diagramLoading.value = false
+    stopPageLoading()
   }
 }
+
+watch(
+  diagramType,
+  (t) => {
+    // On initial page load: do not show fullscreen loading.
+    // On user-initiated switch: show fullscreen loading and refresh via backend.
+    const isInitial = !diagramTypeWatchInitialized
+    diagramTypeWatchInitialized = true
+    void applyDiagramSample(t, { initial: isInitial, preferBackend: true })
+  },
+  { immediate: true }
+)
 
 async function onGenerateIntegration() {
   integrationError.value = ''
@@ -265,6 +958,9 @@ async function onGenerateIntegration() {
       const submit = await submitIntegrationTask(payload)
       const status = await waitTask(submit.task_id)
       const result = (status.result ?? {}) as Record<string, unknown>
+      if (status.state === 'FAILURE') {
+        throw new Error(String(result.error ?? 'Task failed'))
+      }
       integrationMarkdown.value = String(result.markdown ?? '')
     } else {
       const res = await generateIntegration(payload)
@@ -318,11 +1014,22 @@ async function onComputeSettlement() {
 
 watch(metricsRows, () => updateChart())
 
-onMounted(() => {
+onMounted(async () => {
   updateChart()
   statusPanelCollapsed.value = loadBoolFromStorage(STORAGE_KEYS.statusPanelCollapsed, false)
-  refreshLlm()
-  refreshDb()
+  await refreshLlmConfig()
+  await refreshLlm()
+  await refreshDb()
+  llmModeAutoApplyEnabled = true
+
+  // draw.io: load last diagram from storage, fallback to blank
+  drawioXml.value = loadTextFromStorage(STORAGE_KEYS.drawioXml, drawioBlankXml)
+
+  window.addEventListener('message', onDrawioMessage)
+})
+
+onBeforeUnmount(() => {
+  window.removeEventListener('message', onDrawioMessage)
 })
 
 watch(statusPanelCollapsed, (v) => saveBoolToStorage(STORAGE_KEYS.statusPanelCollapsed, v))
@@ -360,6 +1067,12 @@ async function loadArtifact(id: string) {
 
 <template>
   <div class="app">
+    <div v-show="pageLoading" class="el-loading-mask is-fullscreen">
+      <div class="el-loading-spinner">
+        <el-icon class="is-loading" :size="32"><Loading /></el-icon>
+        <p class="el-loading-text">{{ pageLoadingMessage }}</p>
+      </div>
+    </div>
     <el-container style="height: 100vh">
       <el-header class="header">
         <div class="brand">
@@ -407,6 +1120,22 @@ async function loadArtifact(id: string) {
             </div>
           </template>
 
+          <div v-show="statusPanelCollapsed" class="statusStepsCollapsed">
+            <el-steps
+              :active="llmStepActive"
+              align-center
+              process-status="success"
+              finish-status="success"
+              class="steps steps--compact"
+            >
+              <el-step
+                v-for="s in llmSteps"
+                :key="`${s.title}::collapsed`"
+                :title="s.title"
+              />
+            </el-steps>
+          </div>
+
           <div v-show="!statusPanelCollapsed">
             <el-alert
               v-if="llmError"
@@ -421,11 +1150,16 @@ async function loadArtifact(id: string) {
             <el-row :gutter="16">
               <el-col :span="10">
                 <el-descriptions :column="1" border>
-                  <el-descriptions-item label="后端地址">
-                    <div>{{ backendApiBase }}</div>
-                    <div v-if="isDevProxy" style="margin-top: 6px; opacity: 0.85">
-                      真实后端：{{ backendApiBaseReal }}
-                    </div>
+                  <el-descriptions-item label="后端（FastAPI）">
+                    <template v-if="isDevProxy">
+                      <div>后端代理：{{ backendApiProxy }}</div>
+                      <div style="margin-top: 6px; opacity: 0.85">
+                        后端地址：{{ backendApiBaseReal }}
+                      </div>
+                    </template>
+                    <template v-else>
+                      <div>后端地址：{{ backendApiBase }}</div>
+                    </template>
                   </el-descriptions-item>
                   <el-descriptions-item label="数据库">
                     <el-tag v-if="db" :type="db.ok ? 'success' : 'danger'">{{ db.ok ? 'OK' : 'DOWN' }}</el-tag>
@@ -440,19 +1174,55 @@ async function loadArtifact(id: string) {
                     <span v-else>-</span>
                   </el-descriptions-item>
                   <el-descriptions-item label="当前模式">
-                    <el-tag v-if="llm" :type="llm.ok ? 'success' : 'danger'">{{ llm.mode }}</el-tag>
-                    <span v-else>-</span>
+                    <div style="display: flex; align-items: center; gap: 10px; flex-wrap: wrap">
+                      <el-tag v-if="llm" :type="llm.ok ? 'success' : 'danger'">{{ llm.mode }}</el-tag>
+                      <span v-else>-</span>
+
+                      <el-select
+                        v-model="llmMode"
+                        size="small"
+                        :disabled="llmConfigLoading"
+                        :loading="llmConfigLoading"
+                        loading-text="模型切换中…"
+                        style="min-width: 210px"
+                      >
+                        <el-option label="ollama（本地模型）" value="ollama" />
+                        <el-option label="openai_compat（兼容网关）" value="openai_compat" />
+                      </el-select>
+                    </div>
+
+                    <div v-if="llmMode === 'ollama'" style="margin-top: 10px">
+                      <el-form label-position="top" size="small" style="max-width: 520px">
+                        <el-form-item label="Ollama Base URL">
+                          <el-input v-model="ollamaBaseUrl" placeholder="http://localhost:11434" :disabled="llmConfigLoading" />
+                        </el-form-item>
+                        <el-form-item label="Ollama Model">
+                          <el-select
+                            v-model="ollamaModel"
+                            filterable
+                            allow-create
+                            default-first-option
+                            placeholder="选择或输入模型名（例如 llama3.2:1b）"
+                            style="width: 100%"
+                            :disabled="llmConfigLoading"
+                          >
+                            <el-option v-for="m in ollamaPresetModels" :key="m" :label="m" :value="m" />
+                          </el-select>
+                        </el-form-item>
+                      </el-form>
+                    </div>
+
+                    <el-alert
+                      v-if="llmConfigError"
+                      type="error"
+                      :title="llmConfigError"
+                      show-icon
+                      :closable="false"
+                      class="mt"
+                    />
                   </el-descriptions-item>
                   <el-descriptions-item label="Provider">
                     <span v-if="llm">{{ llm.provider }}</span>
-                    <span v-else>-</span>
-                  </el-descriptions-item>
-                  <el-descriptions-item label="Model">
-                    <span v-if="llm">{{ llm.model || '-' }}</span>
-                    <span v-else>-</span>
-                  </el-descriptions-item>
-                  <el-descriptions-item label="Base URL">
-                    <span v-if="llm">{{ llm.base_url || '-' }}</span>
                     <span v-else>-</span>
                   </el-descriptions-item>
                   <el-descriptions-item label="延迟">
@@ -460,25 +1230,11 @@ async function loadArtifact(id: string) {
                     <span v-else>-</span>
                   </el-descriptions-item>
                 </el-descriptions>
-
-                <el-alert
-                  class="mt"
-                  type="info"
-                  title="如何切换到本地模型（Ollama）"
-                  :closable="false"
-                  show-icon
-                >
-                  <div>
-                    1) 安装并启动 Ollama（默认地址 http://localhost:11434）<br />
-                    2) 在 .env 中设置：LLM_MODE=ollama，OLLAMA_MODEL=qwen2.5:7b（或你的模型）<br />
-                    3) 重启后端，再点「刷新」即可看到模式变化
-                  </div>
-                </el-alert>
               </el-col>
 
               <el-col :span="14">
                 <el-steps
-                  :active="llmSteps.length + 1"
+                  :active="llmStepActive"
                   align-center
                   process-status="success"
                   finish-status="success"
@@ -504,7 +1260,7 @@ async function loadArtifact(id: string) {
         </el-card>
 
         <el-tabs v-model="activeTab" class="tabs">
-          <el-tab-pane label="自动出图" name="diagram">
+          <el-tab-pane label="自动出图（mermaid）" name="diagram">
             <el-row :gutter="16">
               <el-col :span="10">
                 <el-form label-position="top">
@@ -524,6 +1280,9 @@ async function loadArtifact(id: string) {
                   <el-button type="primary" :loading="diagramLoading" @click="onGenerateDiagram">
                     生成
                   </el-button>
+                  <div v-if="diagramLocalTimeSec !== null" class="mt" style="opacity: 0.85">
+                    本次生成时间：{{ diagramLocalTimeSec.toFixed(2) }} 秒
+                  </div>
                   <el-alert v-if="diagramError" type="error" :title="diagramError" show-icon class="mt" />
                 </el-form>
               </el-col>
@@ -546,6 +1305,95 @@ async function loadArtifact(id: string) {
                 </el-card>
               </el-col>
             </el-row>
+          </el-tab-pane>
+
+          <el-tab-pane label="架构图（draw.io）" name="drawio">
+            <el-card shadow="never" class="mb">
+              <template #header>
+                <div style="display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap">
+                  <span>嵌入式 draw.io 编辑器（diagrams.net）</span>
+                  <div style="display: flex; align-items: center; gap: 8px; flex-wrap: wrap">
+                    <el-tag size="small" :type="drawioReady ? 'success' : 'warning'">
+                      {{ drawioReady ? 'ready' : 'loading' }}
+                    </el-tag>
+                    <el-tag v-if="drawioStatus" size="small" type="info">{{ drawioStatus }}</el-tag>
+                    <el-button size="small" :disabled="!drawioReady" :loading="drawioBusy" @click="onDrawioSaveClick">
+                      保存
+                    </el-button>
+                    <el-button size="small" :disabled="!drawioReady" :loading="drawioBusy" @click="resetDrawioToMock">
+                      重置示例
+                    </el-button>
+
+                    <label>
+                      <input
+                        type="file"
+                        accept=".drawio,.xml"
+                        style="display: none"
+                        @change="onDrawioFileInputChange"
+                      />
+                      <el-button size="small" :disabled="!drawioReady" :loading="drawioBusy">导入</el-button>
+                    </label>
+
+                    <el-button size="small" :disabled="!drawioReady" :loading="drawioBusy" @click="exportDrawioXmlFile">
+                      导出 .drawio
+                    </el-button>
+                    <el-button size="small" :disabled="!drawioReady" :loading="drawioBusy" @click="() => exportDrawio('png')">
+                      导出 PNG
+                    </el-button>
+                    <el-button size="small" :disabled="!drawioReady" :loading="drawioBusy" @click="() => exportDrawio('pdf')">
+                      导出 PDF
+                    </el-button>
+                    <el-button size="small" :disabled="!drawioReady" :loading="drawioBusy" @click="exportDrawioJson">
+                      导出 JSON
+                    </el-button>
+                  </div>
+                </div>
+              </template>
+
+              <el-alert
+                v-if="drawioError"
+                type="error"
+                :title="drawioError"
+                show-icon
+                class="mb"
+              />
+
+              <el-alert
+                type="info"
+                title="说明：此编辑器通过 https://embed.diagrams.net 以 iframe 方式嵌入；需可访问外网。导出 PNG/PDF 在本地完成，JSON 为包含 draw.io XML 的封装格式。"
+                show-icon
+                :closable="false"
+              />
+
+              <el-form label-position="top" class="mt">
+                <el-form-item label="前置步骤：描述 → 大模型 → draw.io XML">
+                  <el-input
+                    v-model="drawioGenText"
+                    type="textarea"
+                    :rows="4"
+                    placeholder="例如：我们有 Web/H5、App、小程序；通过 API Gateway 进入用户/订单/消息服务；用 MySQL+Redis+Kafka；需要可观测性…"
+                  />
+                </el-form-item>
+                <el-button
+                  type="primary"
+                  size="small"
+                  :disabled="!drawioReady"
+                  :loading="drawioGenLoading"
+                  @click="onGenerateDrawioFromText"
+                >
+                  生成并载入
+                </el-button>
+              </el-form>
+            </el-card>
+
+            <iframe
+              ref="drawioFrame"
+              class="drawioFrame"
+              :src="drawioEmbedUrl"
+              title="draw.io editor"
+              loading="lazy"
+              referrerpolicy="no-referrer"
+            />
           </el-tab-pane>
 
           <el-tab-pane label="接入方案" name="integration">
@@ -688,6 +1536,28 @@ async function loadArtifact(id: string) {
   isolation: isolate;
 }
 
+/* Page-level fullscreen loading overlay: force true center alignment */
+.app :deep(.el-loading-mask.is-fullscreen) {
+  position: fixed !important;
+  inset: 0 !important;
+  /* IMPORTANT: do NOT use display: ... !important here.
+     v-show relies on inline display:none to hide this element. */
+  display: flex;
+  align-items: center !important;
+  justify-content: center !important;
+}
+
+.app :deep(.el-loading-mask.is-fullscreen .el-loading-spinner) {
+  position: static !important;
+  top: auto !important;
+  left: auto !important;
+  right: auto !important;
+  bottom: auto !important;
+  transform: none !important;
+  margin-top: 0 !important;
+  text-align: center;
+}
+
 .app::before {
   content: '';
   position: absolute;
@@ -716,10 +1586,90 @@ async function loadArtifact(id: string) {
   border-bottom: 1px solid var(--el-border-color-lighter);
   background: var(--el-bg-color);
   box-shadow: var(--el-box-shadow-lighter);
+  position: relative;
+  overflow: hidden;
   display: flex;
   align-items: center;
   justify-content: space-between;
   gap: 16px;
+}
+
+.header::before {
+  content: '';
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  background:
+    repeating-linear-gradient(
+      135deg,
+      transparent 0,
+      transparent 14px,
+      color-mix(in srgb, var(--el-color-primary) 18%, transparent) 15px,
+      transparent 22px
+    ),
+    linear-gradient(
+      90deg,
+      transparent 0,
+      color-mix(in srgb, var(--el-border-color-lighter) 55%, transparent) 45%,
+      transparent 70%
+    );
+  opacity: 0.55;
+  transform: translateZ(0);
+  animation: headerTechLines 14s linear infinite;
+  mask-image: linear-gradient(90deg, transparent 0, #000 18%, #000 82%, transparent 100%);
+}
+
+.header::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  background:
+    radial-gradient(
+      circle at 12% 40%,
+      color-mix(in srgb, var(--el-color-primary) 28%, transparent) 0 1px,
+      transparent 2px
+    ),
+    radial-gradient(
+      circle at 72% 30%,
+      color-mix(in srgb, var(--el-color-success) 20%, transparent) 0 1px,
+      transparent 2px
+    ),
+    radial-gradient(
+      circle at 42% 78%,
+      color-mix(in srgb, var(--el-border-color-lighter) 70%, transparent) 0 1px,
+      transparent 2px
+    );
+  background-size: 280px 140px;
+  opacity: 0.35;
+  transform: translateZ(0);
+  animation: headerParticles 22s linear infinite;
+  mask-image: linear-gradient(90deg, transparent 0, #000 10%, #000 90%, transparent 100%);
+}
+
+@keyframes headerTechLines {
+  from {
+    background-position: 0 0, 0 0;
+  }
+  to {
+    background-position: 240px 0, -120px 0;
+  }
+}
+
+@keyframes headerParticles {
+  from {
+    background-position: 0 0;
+  }
+  to {
+    background-position: -280px 0;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .header::before,
+  .header::after {
+    animation: none;
+  }
 }
 
 .brand {
@@ -769,6 +1719,10 @@ async function loadArtifact(id: string) {
   margin-bottom: 12px;
 }
 
+.statusStepsCollapsed {
+  margin-bottom: 8px;
+}
+
 .steps {
   margin-bottom: 12px;
   padding: 8px 10px 6px;
@@ -778,6 +1732,20 @@ async function loadArtifact(id: string) {
   overflow: hidden;
   flex-wrap: nowrap;
   min-height: 64px;
+}
+
+.steps.steps--compact {
+  margin-bottom: 0;
+  padding: 6px 10px;
+  min-height: 44px;
+}
+
+.steps.steps--compact :deep(.el-step__description) {
+  display: none;
+}
+
+.steps.steps--compact :deep(.el-step__main) {
+  padding-bottom: 0;
 }
 
 .steps :deep(.el-step__title) {
@@ -831,5 +1799,13 @@ async function loadArtifact(id: string) {
 .mermaid :deep(svg) {
   max-width: 100%;
   height: auto;
+}
+
+.drawioFrame {
+  width: 100%;
+  height: 720px;
+  border: 1px solid var(--el-border-color-lighter);
+  border-radius: var(--el-border-radius-base);
+  background: var(--el-bg-color);
 }
 </style>

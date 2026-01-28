@@ -1,14 +1,78 @@
 from __future__ import annotations
 
 import time
+from typing import Literal, Optional
 
 from fastapi import APIRouter
+from pydantic import BaseModel, Field
 
 from app.core.settings import settings
 from app.llm.factory import get_provider
 from app.llm.types import ChatMessage, LLMChatRequest
 
 router = APIRouter()
+
+
+class LlmConfigOut(BaseModel):
+    mode: str
+    provider: str
+    model: Optional[str] = None
+    base_url: Optional[str] = None
+
+
+class LlmConfigIn(BaseModel):
+    mode: Literal["openai_compat", "ollama"] = Field(..., description="LLM mode to use")
+    ollama_base_url: Optional[str] = Field(None, description="Override OLLAMA_BASE_URL when mode=ollama")
+    ollama_model: Optional[str] = Field(None, description="Override OLLAMA_MODEL when mode=ollama")
+
+
+def _current_llm_config() -> LlmConfigOut:
+    provider = get_provider()
+    mode = settings.LLM_MODE
+
+    if mode == "openai_compat":
+        model = settings.OPENAI_COMPAT_MODEL or None
+        base_url = settings.OPENAI_COMPAT_BASE_URL or None
+    else:  # ollama
+        model = settings.OLLAMA_MODEL or None
+        base_url = settings.OLLAMA_BASE_URL or None
+
+    return LlmConfigOut(
+        mode=mode,
+        provider=getattr(provider, "name", provider.__class__.__name__),
+        model=model,
+        base_url=base_url,
+    )
+
+
+@router.get("/config")
+async def llm_get_config() -> LlmConfigOut:
+    """Return current LLM runtime config.
+
+    Notes:
+    - Does not return any secrets (e.g. API keys).
+    - This is process-local; if you run multiple backend processes, each has its own setting.
+    """
+
+    return _current_llm_config()
+
+
+@router.post("/config")
+async def llm_set_config(body: LlmConfigIn) -> LlmConfigOut:
+    """Update current LLM runtime config.
+
+    This updates the in-memory Settings instance so it takes effect immediately.
+    """
+
+    settings.LLM_MODE = body.mode
+
+    if body.mode == "ollama":
+        if body.ollama_base_url:
+            settings.OLLAMA_BASE_URL = body.ollama_base_url
+        if body.ollama_model:
+            settings.OLLAMA_MODEL = body.ollama_model
+
+    return _current_llm_config()
 
 
 @router.get("/ping")

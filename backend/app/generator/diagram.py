@@ -17,3 +17,11 @@ class DiagramGenerateRequest(BaseModel):
 class DiagramGenerateResponse(BaseModel):
     spec: dict[str, Any]
     mermaid: str
+
+
+class DrawioXmlGenerateRequest(BaseModel):
+    text: str = Field(description="User description to be converted into draw.io mxfile XML")
+
+
+class DrawioXmlGenerateResponse(BaseModel):
+    xml: str = Field(description="draw.io mxfile XML")

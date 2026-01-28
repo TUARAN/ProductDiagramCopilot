@@ -11,6 +11,14 @@ export interface DiagramGenerateResponse {
   mermaid: string
 }
 
+export interface DrawioXmlGenerateRequest {
+  text: string
+}
+
+export interface DrawioXmlGenerateResponse {
+  xml: string
+}
+
 export interface IntegrationGenerateRequest {
   text: string
   swagger_text?: string
@@ -66,6 +74,19 @@ export interface LlmPingResponse {
   error?: string
 }
 
+export interface LlmConfigResponse {
+  mode: string
+  provider: string
+  model?: string | null
+  base_url?: string | null
+}
+
+export interface LlmConfigRequest {
+  mode: 'openai_compat' | 'ollama'
+  ollama_base_url?: string
+  ollama_model?: string
+}
+
 export interface DbPingResponse {
   ok: boolean
   dialect: string
@@ -77,8 +98,21 @@ export interface DbPingResponse {
   error?: string
 }
 
+function isTauriRuntime(): boolean {
+  if (typeof window === 'undefined') return false
+  const w = window as any
+  // Tauri v1 exposed __TAURI__. Tauri v2 commonly exposes __TAURI_INTERNALS__.
+  return Boolean(w.__TAURI__ || w.__TAURI_INTERNALS__)
+}
+
+function apiBase(): string {
+  // In normal web/dev, we rely on same-origin `/api` (Vite proxy in dev).
+  // In Tauri production, the origin is not the dev server, so use the local backend.
+  return isTauriRuntime() ? 'http://localhost:8000' : ''
+}
+
 async function http<T>(path: string, init: RequestInit): Promise<T> {
-  const res = await fetch(path, {
+  const res = await fetch(`${apiBase()}${path}`, {
     ...init,
     headers: {
       'content-type': 'application/json',
@@ -87,6 +121,21 @@ async function http<T>(path: string, init: RequestInit): Promise<T> {
   })
 
   if (!res.ok) {
+    const contentType = res.headers.get('content-type') || ''
+    if (contentType.includes('application/json')) {
+      const data = (await res.json().catch(() => null)) as any
+      const detail = data?.detail ?? data?.error ?? null
+      const msg =
+        typeof detail === 'string'
+          ? detail
+          : detail
+            ? JSON.stringify(detail)
+            : data
+              ? JSON.stringify(data)
+              : ''
+      throw new Error(msg || `HTTP ${res.status}`)
+    }
+
     const text = await res.text().catch(() => '')
     throw new Error(text || `HTTP ${res.status}`)
   }
@@ -96,6 +145,13 @@ async function http<T>(path: string, init: RequestInit): Promise<T> {
 
 export function generateDiagram(req: DiagramGenerateRequest) {
   return http<DiagramGenerateResponse>('/api/diagram/generate', {
+    method: 'POST',
+    body: JSON.stringify(req),
+  })
+}
+
+export function generateDrawioXml(req: DrawioXmlGenerateRequest) {
+  return http<DrawioXmlGenerateResponse>('/api/diagram/drawio-xml', {
     method: 'POST',
     body: JSON.stringify(req),
   })
@@ -150,6 +206,19 @@ export function getArtifact(artifactId: string) {
 export function llmPing() {
   return http<LlmPingResponse>('/api/llm/ping', {
     method: 'GET',
+  })
+}
+
+export function getLlmConfig() {
+  return http<LlmConfigResponse>('/api/llm/config', {
+    method: 'GET',
+  })
+}
+
+export function setLlmConfig(req: LlmConfigRequest) {
+  return http<LlmConfigResponse>('/api/llm/config', {
+    method: 'POST',
+    body: JSON.stringify(req),
   })
 }
 
