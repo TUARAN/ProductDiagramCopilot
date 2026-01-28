@@ -6,6 +6,8 @@ import { jsPDF } from 'jspdf'
 
 import LogPage from './components/LogPage.vue'
 
+import { PDC_CONFIG, type BusinessId, type StrategyId, type PdcStrategy } from './config/pdc.config'
+
 import {
   dbPing,
   generateDiagram,
@@ -32,6 +34,118 @@ import drawioBlankXml from './assets/drawio-blank.drawio?raw'
 const activeTab = ref<'diagram' | 'drawio' | 'integration' | 'settlement' | 'artifacts'>('diagram')
 
 const logsOpen = ref(false)
+
+// Business optional configuration (front-end)
+const selectedBusinessId = ref<BusinessId>(PDC_CONFIG.businesses[0]?.businessId ?? 'settlement')
+const selectedTemplateId = ref<string>('')
+const selectedStrategyId = ref<StrategyId>('mermaid.svg.web.v1')
+
+const selectedBusiness = computed(() =>
+  PDC_CONFIG.businesses.find((b) => b.businessId === selectedBusinessId.value) ?? null
+)
+
+const templatesForBusiness = computed(() => {
+  const biz = selectedBusiness.value
+  if (!biz) return []
+  const enabled = new Set(biz.enabledTemplates)
+  return PDC_CONFIG.templates.filter((t) => t.businessId === biz.businessId && enabled.has(t.templateId))
+})
+
+const selectedTemplate = computed(() =>
+  templatesForBusiness.value.find((t) => t.templateId === selectedTemplateId.value) ?? null
+)
+
+const strategiesForSelection = computed(() => {
+  const biz = selectedBusiness.value
+  if (!biz) return []
+
+  const enabled = new Set<StrategyId>(biz.enabledStrategies)
+  const recommended = selectedTemplate.value?.recommendedStrategyIds?.length
+    ? new Set<StrategyId>(selectedTemplate.value.recommendedStrategyIds)
+    : null
+
+  const ids = biz.enabledStrategies.filter((id) => enabled.has(id) && (!recommended || recommended.has(id)))
+  const byId = new Map(PDC_CONFIG.strategies.map((s) => [s.strategyId, s]))
+  return ids
+    .map((id) => byId.get(id))
+    .filter((s): s is PdcStrategy => Boolean(s))
+})
+
+const selectedStrategy = computed(() =>
+  PDC_CONFIG.strategies.find((s) => s.strategyId === selectedStrategyId.value) ?? null
+)
+
+function applyTemplateSeed() {
+  const t = selectedTemplate.value
+  if (!t) return
+
+  const example = (t.exampleInputs?.[0] ?? '').trim()
+
+  if (t.graphType === 'architecture') {
+    activeTab.value = 'drawio'
+    if (example) drawioGenText.value = example
+    return
+  }
+
+  if (t.graphType === 'metrics') {
+    activeTab.value = 'settlement'
+    return
+  }
+
+  // flow/dataflow/attribution default to Mermaid diagram tab
+  activeTab.value = 'diagram'
+  if (example) diagramText.value = example
+  // Current UI supports flow/sequence/state only; treat dataflow/attribution as flow for now.
+  diagramType.value = 'flow'
+}
+
+function applyStrategyRouting() {
+  const s = selectedStrategy.value
+  if (!s) return
+  if (s.pipelineKind === 'drawio_editable') activeTab.value = 'drawio'
+  else if (s.pipelineKind === 'settlement_echarts') activeTab.value = 'settlement'
+  else activeTab.value = 'diagram'
+}
+
+function resetSelectionToBusinessDefaults() {
+  const biz = selectedBusiness.value
+  if (!biz) return
+  selectedTemplateId.value = biz.defaults.templateId
+  selectedStrategyId.value = biz.defaults.strategyId
+
+  // Ensure defaults exist in current enabled lists.
+  if (!templatesForBusiness.value.some((t) => t.templateId === selectedTemplateId.value)) {
+    selectedTemplateId.value = templatesForBusiness.value[0]?.templateId ?? ''
+  }
+
+  const validStrategyIds = new Set(strategiesForSelection.value.map((s) => s.strategyId))
+  if (!validStrategyIds.has(selectedStrategyId.value)) {
+    selectedStrategyId.value = (strategiesForSelection.value[0]?.strategyId ?? 'mermaid.svg.web.v1') as StrategyId
+  }
+
+  applyStrategyRouting()
+  applyTemplateSeed()
+}
+
+watch(
+  selectedBusinessId,
+  () => {
+    resetSelectionToBusinessDefaults()
+  },
+  { immediate: true }
+)
+
+watch(selectedTemplateId, () => {
+  // If template recommends strategies, align to its first recommendation.
+  const rec = selectedTemplate.value?.recommendedStrategyIds?.[0]
+  if (rec) selectedStrategyId.value = rec
+  applyStrategyRouting()
+  applyTemplateSeed()
+})
+
+watch(selectedStrategyId, () => {
+  applyStrategyRouting()
+})
 
 const STORAGE_KEYS = {
   statusPanelCollapsed: 'pdc:statusPanelCollapsed',
@@ -1128,6 +1242,47 @@ async function loadArtifact(id: string) {
         </div>
 
         <div class="headerRight">
+          <el-select
+            v-model="selectedBusinessId"
+            size="small"
+            style="min-width: 170px"
+          >
+            <el-option
+              v-for="b in PDC_CONFIG.businesses"
+              :key="b.businessId"
+              :label="b.label"
+              :value="b.businessId"
+            />
+          </el-select>
+
+          <el-select
+            v-model="selectedTemplateId"
+            size="small"
+            style="min-width: 220px"
+            :disabled="templatesForBusiness.length === 0"
+          >
+            <el-option
+              v-for="t in templatesForBusiness"
+              :key="t.templateId"
+              :label="t.label"
+              :value="t.templateId"
+            />
+          </el-select>
+
+          <el-select
+            v-model="selectedStrategyId"
+            size="small"
+            style="min-width: 220px"
+            :disabled="strategiesForSelection.length === 0"
+          >
+            <el-option
+              v-for="s in strategiesForSelection"
+              :key="s.strategyId"
+              :label="s.label"
+              :value="s.strategyId"
+            />
+          </el-select>
+
           <el-tag size="small" :type="db?.ok ? 'success' : 'warning'">
             DB: {{ db?.ok ? 'ok' : 'down' }}
           </el-tag>
