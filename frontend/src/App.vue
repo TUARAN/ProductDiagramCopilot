@@ -34,14 +34,23 @@ import drawioBlankXml from './assets/drawio-blank.drawio?raw'
 const activeTab = ref<'diagram' | 'drawio' | 'integration' | 'settlement' | 'artifacts'>('diagram')
 
 const logsOpen = ref(false)
+const statusPanelOpen = ref(false)
+
+// NOTE: These refs are used by applyTemplateSeed(). Keep them declared before
+// any watchers that might call applyTemplateSeed during setup.
+const diagramType = ref<DiagramType>('flow')
+const diagramText = ref('')
+const drawioGenText = ref('')
 
 // Business optional configuration (front-end)
-const selectedBusinessId = ref<BusinessId>(PDC_CONFIG.businesses[0]?.businessId ?? 'settlement')
+const selectedBusinessId = ref<BusinessId | ''>('')
 const selectedTemplateId = ref<string>('')
-const selectedStrategyId = ref<StrategyId>('mermaid.svg.web.v1')
+const selectedStrategyId = ref<StrategyId | ''>('')
 
 const selectedBusiness = computed(() =>
-  PDC_CONFIG.businesses.find((b) => b.businessId === selectedBusinessId.value) ?? null
+  selectedBusinessId.value
+    ? (PDC_CONFIG.businesses.find((b) => b.businessId === selectedBusinessId.value) ?? null)
+    : null
 )
 
 const templatesForBusiness = computed(() => {
@@ -72,18 +81,39 @@ const strategiesForSelection = computed(() => {
 })
 
 const selectedStrategy = computed(() =>
-  PDC_CONFIG.strategies.find((s) => s.strategyId === selectedStrategyId.value) ?? null
+  selectedStrategyId.value
+    ? (PDC_CONFIG.strategies.find((s) => s.strategyId === selectedStrategyId.value) ?? null)
+    : null
 )
+
+const lastTemplateSeededId = ref<string>('')
+const lastSeededDiagramText = ref<string>('')
+const lastSeededDrawioText = ref<string>('')
+
+function shouldReplaceSeed(current: string, lastSeed: string) {
+  const cur = (current ?? '').trim()
+  const last = (lastSeed ?? '').trim()
+  return !cur || (last && cur === last)
+}
 
 function applyTemplateSeed() {
   const t = selectedTemplate.value
   if (!t) return
 
-  const example = (t.exampleInputs?.[0] ?? '').trim()
+  const bizLabel = (selectedBusiness.value?.label ?? '').trim()
+  const rawExample = (t.exampleInputs?.[0] ?? '').trim()
+  const example =
+    rawExample && bizLabel && !rawExample.includes(bizLabel)
+      ? `【${bizLabel}】${rawExample}`
+      : rawExample
 
   if (t.graphType === 'architecture') {
     activeTab.value = 'drawio'
-    if (example) drawioGenText.value = example
+    if (example && shouldReplaceSeed(drawioGenText.value, lastSeededDrawioText.value)) {
+      drawioGenText.value = example
+      lastSeededDrawioText.value = example
+      lastTemplateSeededId.value = t.templateId
+    }
     return
   }
 
@@ -92,11 +122,17 @@ function applyTemplateSeed() {
     return
   }
 
-  // flow/dataflow/attribution default to Mermaid diagram tab
+  // flow default to Mermaid diagram tab
   activeTab.value = 'diagram'
-  if (example) diagramText.value = example
-  // Current UI supports flow/sequence/state only; treat dataflow/attribution as flow for now.
-  diagramType.value = 'flow'
+  if (example && shouldReplaceSeed(diagramText.value, lastSeededDiagramText.value)) {
+    diagramText.value = example
+    lastSeededDiagramText.value = example
+    lastTemplateSeededId.value = t.templateId
+  }
+  // Current UI supports flow/sequence/state only.
+  if (t.graphType === 'sequence') diagramType.value = 'sequence'
+  else if (t.graphType === 'state') diagramType.value = 'state'
+  else diagramType.value = 'flow'
 }
 
 function applyStrategyRouting() {
@@ -107,43 +143,26 @@ function applyStrategyRouting() {
   else activeTab.value = 'diagram'
 }
 
-function resetSelectionToBusinessDefaults() {
-  const biz = selectedBusiness.value
-  if (!biz) return
-  selectedTemplateId.value = biz.defaults.templateId
-  selectedStrategyId.value = biz.defaults.strategyId
-
-  // Ensure defaults exist in current enabled lists.
-  if (!templatesForBusiness.value.some((t) => t.templateId === selectedTemplateId.value)) {
-    selectedTemplateId.value = templatesForBusiness.value[0]?.templateId ?? ''
-  }
-
-  const validStrategyIds = new Set(strategiesForSelection.value.map((s) => s.strategyId))
-  if (!validStrategyIds.has(selectedStrategyId.value)) {
-    selectedStrategyId.value = (strategiesForSelection.value[0]?.strategyId ?? 'mermaid.svg.web.v1') as StrategyId
-  }
-
-  applyStrategyRouting()
-  applyTemplateSeed()
-}
-
 watch(
   selectedBusinessId,
   () => {
-    resetSelectionToBusinessDefaults()
-  },
-  { immediate: true }
+    // Business selection should not default template/strategy.
+    selectedTemplateId.value = ''
+    selectedStrategyId.value = ''
+  }
 )
 
 watch(selectedTemplateId, () => {
+  if (!selectedTemplateId.value) return
   // If template recommends strategies, align to its first recommendation.
   const rec = selectedTemplate.value?.recommendedStrategyIds?.[0]
-  if (rec) selectedStrategyId.value = rec
+  if (rec && !selectedStrategyId.value) selectedStrategyId.value = rec
   applyStrategyRouting()
   applyTemplateSeed()
 })
 
 watch(selectedStrategyId, () => {
+  if (!selectedStrategyId.value) return
   applyStrategyRouting()
 })
 
@@ -184,7 +203,6 @@ const drawioXml = ref('')
 let drawioPendingSave: ((xml: string) => void) | null = null
 let drawioPendingExport: DrawioExportKind | null = null
 
-const drawioGenText = ref('')
 const drawioGenLoading = ref(false)
 
 const drawioEmbedUrl = computed(() => {
@@ -781,10 +799,6 @@ async function waitTask(taskId: string, timeoutMs = 15000) {
 }
 
 // Diagram
-const diagramType = ref<DiagramType>('flow')
-const diagramText = ref(
-  '用户提交退款申请 -> 系统校验 -> 进入人工审核 -> 审核通过则发起打款 -> 更新退款状态 -> 通知用户'
-)
 const diagramMermaid = ref('')
 const diagramSvg = ref('')
 const diagramLoading = ref(false)
@@ -859,142 +873,36 @@ const diagramDefaultTextByType: Record<DiagramType, string> = {
   sequence: '用户在 App 下单并支付；订单系统调用库存系统锁定库存；支付系统回调订单系统确认支付；订单系统通知用户下单成功。',
   state: '一个订单从创建到完成：创建(待支付) -> 已支付 -> 已发货 -> 已完成；支付失败或超时进入已取消；退款进入已退款。',
 }
-
-const diagramSampleMermaidFallbackByType: Record<DiagramType, string> = {
-  flow: `flowchart TD
-  A[开始] --> B[校验输入]
-  B --> C[处理]
-  C --> D[结束]
-`,
-  sequence: `sequenceDiagram
-  participant U as 用户
-  participant S as 系统
-  U->>S: 发起请求
-  S-->>U: 返回结果
-`,
-  state: `stateDiagram-v2
-  [*] --> Idle
-  Idle --> Processing: start
-  Processing --> Done: finish
-  Done --> [*]
-`,
-}
-
-let diagramSampleToken = 0
 let diagramTypeWatchInitialized = false
 
 type ApplySampleOptions = {
   /** First render on page load: do not show fullscreen loading */
   initial?: boolean
-  /** If true, try backend/LLM generation; otherwise only local fallback */
-  preferBackend?: boolean
+  /** Previous diagram type, used to decide whether to auto-replace the text */
+  prevType?: DiagramType
 }
 
 async function applyDiagramSample(type: DiagramType, options: ApplySampleOptions = {}) {
-  const token = ++diagramSampleToken
   diagramError.value = ''
   diagramLocalTimeSec.value = null
-  const isInitial = Boolean(options.initial)
-  const preferBackend = options.preferBackend !== false
 
-  // 1) Always set a default text prompt for this diagram type.
-  diagramText.value = diagramDefaultTextByType[type] || diagramDefaultTextByType.flow
+  // 切换图类型不自动生成：仅在合适时更新默认描述文本，并清空渲染结果。
+  const nextDefault = diagramDefaultTextByType[type] || diagramDefaultTextByType.flow
+  const prevType = options.prevType
+  const prevDefault = prevType ? (diagramDefaultTextByType[prevType] || diagramDefaultTextByType.flow) : undefined
 
-  // Initial page entry: do NOT show fullscreen loading.
-  if (isInitial) {
-    setLlmStepActive(7)
-    const fallback =
-      diagramSampleMermaidFallbackByType[type] || diagramSampleMermaidFallbackByType.flow
-    diagramMermaid.value = fallback
-    try {
-      const svg = await renderMermaid(`sample-${type}-${Date.now()}`, fallback)
-      if (token !== diagramSampleToken) return
-      diagramSvg.value = svg
-    } catch {
-      if (token !== diagramSampleToken) return
-      diagramSvg.value = ''
-    }
+  const currentText = diagramText.value?.trim() || ''
+  const shouldReplaceText =
+    !currentText ||
+    (prevDefault ? currentText === prevDefault.trim() : Boolean(options.initial))
 
-    if (!preferBackend) return
-
-    // Optional silent refresh via backend/LLM (no fullscreen overlay).
-    try {
-      const res = await generateDiagram({
-        diagram_type: type,
-        text: diagramText.value,
-        scene: 'product',
-      })
-      if (token !== diagramSampleToken) return
-      diagramMermaid.value = res.mermaid
-      diagramSvg.value = res.mermaid
-        ? await renderMermaid(`sample-${type}-${Date.now()}`, res.mermaid)
-        : ''
-    } catch {
-      // ignore (keep local)
-    }
-    return
+  if (shouldReplaceText) {
+    diagramText.value = nextDefault
   }
 
-  // User-initiated switch: show fullscreen loading until backend completes (fallback on error).
-  startPageLoading('switch')
-  setLlmStepActive(1)
-
-  if (!preferBackend) {
-    // If backend is disabled, just show local fallback.
-    const fallback =
-      diagramSampleMermaidFallbackByType[type] || diagramSampleMermaidFallbackByType.flow
-    diagramMermaid.value = fallback
-    try {
-      setLlmStepActive(5)
-      const svg = await renderMermaid(`sample-${type}-${Date.now()}`, fallback)
-      if (token !== diagramSampleToken) return
-      diagramSvg.value = svg
-      setLlmStepActive(6)
-      setLlmStepActive(7)
-    } catch {
-      if (token !== diagramSampleToken) return
-      diagramSvg.value = ''
-    } finally {
-      if (token === diagramSampleToken) stopPageLoading()
-    }
-    return
-  }
-
-  try {
-    setLlmStepActive(2)
-    setLlmStepActive(3)
-    const res = await generateDiagram({
-      diagram_type: type,
-      text: diagramText.value,
-      scene: 'product',
-    })
-    if (token !== diagramSampleToken) return
-    setLlmStepActive(4)
-    diagramMermaid.value = res.mermaid
-    setLlmStepActive(5)
-    diagramSvg.value = res.mermaid
-      ? await renderMermaid(`sample-${type}-${Date.now()}`, res.mermaid)
-      : ''
-    setLlmStepActive(6)
-    setLlmStepActive(7)
-  } catch {
-    const fallback =
-      diagramSampleMermaidFallbackByType[type] || diagramSampleMermaidFallbackByType.flow
-    diagramMermaid.value = fallback
-    try {
-      setLlmStepActive(5)
-      const svg = await renderMermaid(`sample-${type}-${Date.now()}`, fallback)
-      if (token !== diagramSampleToken) return
-      diagramSvg.value = svg
-      setLlmStepActive(6)
-      setLlmStepActive(7)
-    } catch {
-      if (token !== diagramSampleToken) return
-      diagramSvg.value = ''
-    }
-  } finally {
-    if (token === diagramSampleToken) stopPageLoading()
-  }
+  diagramMermaid.value = ''
+  diagramSvg.value = ''
+  setLlmStepActive(7)
 }
 
 // Integration
@@ -1096,12 +1004,10 @@ async function onGenerateDiagram() {
 
 watch(
   diagramType,
-  (t) => {
-    // On initial page load: do not show fullscreen loading.
-    // On user-initiated switch: show fullscreen loading and refresh via backend.
+  (t, prev) => {
     const isInitial = !diagramTypeWatchInitialized
     diagramTypeWatchInitialized = true
-    void applyDiagramSample(t, { initial: isInitial, preferBackend: true })
+    void applyDiagramSample(t, { initial: isInitial, prevType: prev })
   },
   { immediate: true }
 )
@@ -1176,6 +1082,8 @@ async function onComputeSettlement() {
 watch(metricsRows, () => updateChart())
 
 onMounted(async () => {
+  // Important: run after setup finished, otherwise applyTemplateSeed can hit TDZ
+  // when diagramText/drawioGenText refs haven't been initialized yet.
   updateChart()
   statusPanelCollapsed.value = loadBoolFromStorage(STORAGE_KEYS.statusPanelCollapsed, false)
   await refreshLlmConfig()
@@ -1236,68 +1144,56 @@ async function loadArtifact(id: string) {
     </div>
     <el-container style="height: 100vh">
       <el-header class="header">
-        <div class="brand">
-          <div class="title">产品智绘官（Product Diagram Copilot）</div>
-          <div class="subtitle">文本 → Diagram Spec/XML → Mermaid / drawio / 结算指标可视化</div>
+        <div class="headerTop">
+          <div class="brand">
+            <div class="title">产品智绘官（Product Diagram Copilot）</div>
+            <div class="subtitle">文本 → Diagram Spec/XML → Mermaid / drawio / 结算指标可视化</div>
+          </div>
+
+          <div class="headerRight">
+            <el-tag size="small" :type="db?.ok ? 'success' : 'warning'">
+              DB: {{ db?.ok ? 'ok' : 'down' }}
+            </el-tag>
+            <el-tag size="small" type="info">DB Latency: {{ db?.latency_ms ?? '-' }}ms</el-tag>
+            <el-tag size="small" :type="llm?.ok ? 'success' : 'warning'">
+              LLM: {{ llm?.mode || 'unknown' }}
+            </el-tag>
+            <el-tag size="small" type="info">Model: {{ llm?.model || '-' }}</el-tag>
+            <el-tag size="small" type="info">Latency: {{ llm?.latency_ms ?? '-' }}ms</el-tag>
+            <el-button size="small" @click="() => { statusPanelOpen = !statusPanelOpen }">
+              {{ statusPanelOpen ? '收起状态面板' : '状态面板' }}
+            </el-button>
+            <el-button size="small" @click="() => { logsOpen = !logsOpen }">
+              {{ logsOpen ? '收起日志' : '日志' }}
+            </el-button>
+          </div>
         </div>
 
-        <div class="headerRight">
-          <el-select
-            v-model="selectedBusinessId"
-            size="small"
-            style="min-width: 170px"
-          >
-            <el-option
-              v-for="b in PDC_CONFIG.businesses"
-              :key="b.businessId"
-              :label="b.label"
-              :value="b.businessId"
-            />
+        <div class="selectorBar selectorBarInHeader">
+          <div class="selectorTitle">业务配置</div>
+          <el-select v-model="selectedBusinessId" size="small" style="width: 140px" placeholder="请选择业务">
+            <el-option v-for="b in PDC_CONFIG.businesses" :key="b.businessId" :label="b.label" :value="b.businessId" />
           </el-select>
 
           <el-select
             v-model="selectedTemplateId"
             size="small"
-            style="min-width: 220px"
+            style="width: 180px"
             :disabled="templatesForBusiness.length === 0"
+            placeholder="请选择模板"
           >
-            <el-option
-              v-for="t in templatesForBusiness"
-              :key="t.templateId"
-              :label="t.label"
-              :value="t.templateId"
-            />
+            <el-option v-for="t in templatesForBusiness" :key="t.templateId" :label="t.label" :value="t.templateId" />
           </el-select>
 
           <el-select
             v-model="selectedStrategyId"
             size="small"
-            style="min-width: 220px"
+            style="width: 180px"
             :disabled="strategiesForSelection.length === 0"
+            placeholder="请选择策略"
           >
-            <el-option
-              v-for="s in strategiesForSelection"
-              :key="s.strategyId"
-              :label="s.label"
-              :value="s.strategyId"
-            />
+            <el-option v-for="s in strategiesForSelection" :key="s.strategyId" :label="s.label" :value="s.strategyId" />
           </el-select>
-
-          <el-tag size="small" :type="db?.ok ? 'success' : 'warning'">
-            DB: {{ db?.ok ? 'ok' : 'down' }}
-          </el-tag>
-          <el-tag size="small" type="info">DB Latency: {{ db?.latency_ms ?? '-' }}ms</el-tag>
-          <el-tag size="small" :type="llm?.ok ? 'success' : 'warning'">
-            LLM: {{ llm?.mode || 'unknown' }}
-          </el-tag>
-          <el-tag size="small" type="info">Model: {{ llm?.model || '-' }}</el-tag>
-          <el-tag size="small" type="info">Latency: {{ llm?.latency_ms ?? '-' }}ms</el-tag>
-          <el-button size="small" @click="() => { logsOpen = !logsOpen }">
-            {{ logsOpen ? '收起日志' : '日志' }}
-          </el-button>
-          <el-button size="small" :loading="llmLoading || dbLoading" @click="() => { refreshDb(); refreshLlm(); }">
-            刷新
-          </el-button>
         </div>
       </el-header>
 
@@ -1312,7 +1208,7 @@ async function loadArtifact(id: string) {
           <LogPage />
         </el-card>
 
-        <el-card class="mb panel" shadow="never">
+        <el-card v-if="statusPanelOpen" class="mb panel" shadow="never">
           <template #header>
             <div style="display: flex; align-items: center; justify-content: space-between">
               <span>LLM / DB 状态 & 可选组件</span>
@@ -1322,6 +1218,13 @@ async function loadArtifact(id: string) {
                   @click="() => { statusPanelCollapsed = !statusPanelCollapsed }"
                 >
                   {{ statusPanelCollapsed ? '展开' : '折叠' }}
+                </el-button>
+                <el-button
+                  size="small"
+                  :loading="llmLoading || dbLoading"
+                  @click="() => { refreshDb(); refreshLlm(); }"
+                >
+                  刷新
                 </el-button>
               </div>
             </div>
@@ -1479,7 +1382,12 @@ async function loadArtifact(id: string) {
                     </el-select>
                   </el-form-item>
                   <el-form-item label="描述文本">
-                    <el-input v-model="diagramText" type="textarea" :rows="10" />
+                    <el-input
+                      v-model="diagramText"
+                      type="textarea"
+                      :rows="10"
+                      placeholder="请输入描述文本"
+                    />
                   </el-form-item>
                   <el-form-item label="执行模式">
                     <el-switch v-model="diagramAsync" active-text="异步" inactive-text="同步" />
@@ -1604,6 +1512,39 @@ async function loadArtifact(id: string) {
           </el-tab-pane>
 
 
+          <el-tab-pane label="大数据图（Echart）" name="settlement">
+            <el-row :gutter="16">
+              <el-col :span="8">
+                <el-form label-position="top">
+                  <el-form-item label="月份（YYYY-MM）">
+                    <el-input v-model="month" placeholder="2026-01" />
+                  </el-form-item>
+                  <el-button type="primary" :loading="settlementLoading" @click="onComputeSettlement">
+                    计算示例指标
+                  </el-button>
+                  <el-alert
+                    v-if="settlementError"
+                    type="error"
+                    :title="settlementError"
+                    show-icon
+                    class="mt"
+                  />
+                </el-form>
+
+                <el-table :data="metricsRows" class="mt" size="small" border>
+                  <el-table-column prop="name" label="指标" />
+                  <el-table-column prop="value" label="数值" />
+                </el-table>
+              </el-col>
+              <el-col :span="16">
+                <el-card>
+                  <template #header>图表</template>
+                  <div ref="chartEl" style="height: 420px; width: 100%" />
+                </el-card>
+              </el-col>
+            </el-row>
+          </el-tab-pane>
+
           <el-tab-pane label="接入方案" name="integration">
             <el-row :gutter="16">
               <el-col :span="10">
@@ -1633,39 +1574,6 @@ async function loadArtifact(id: string) {
                 <el-card>
                   <template #header>方案输出（Markdown 文本）</template>
                   <el-input v-model="integrationMarkdown" type="textarea" :rows="18" readonly />
-                </el-card>
-              </el-col>
-            </el-row>
-          </el-tab-pane>
-
-          <el-tab-pane label="结算指标" name="settlement">
-            <el-row :gutter="16">
-              <el-col :span="8">
-                <el-form label-position="top">
-                  <el-form-item label="月份（YYYY-MM）">
-                    <el-input v-model="month" placeholder="2026-01" />
-                  </el-form-item>
-                  <el-button type="primary" :loading="settlementLoading" @click="onComputeSettlement">
-                    计算示例指标
-                  </el-button>
-                  <el-alert
-                    v-if="settlementError"
-                    type="error"
-                    :title="settlementError"
-                    show-icon
-                    class="mt"
-                  />
-                </el-form>
-
-                <el-table :data="metricsRows" class="mt" size="small" border>
-                  <el-table-column prop="name" label="指标" />
-                  <el-table-column prop="value" label="数值" />
-                </el-table>
-              </el-col>
-              <el-col :span="16">
-                <el-card>
-                  <template #header>图表</template>
-                  <div ref="chartEl" style="height: 420px; width: 100%" />
                 </el-card>
               </el-col>
             </el-row>
@@ -1789,13 +1697,22 @@ async function loadArtifact(id: string) {
 }
 
 .header {
-  height: 56px;
-  padding: 0 16px;
+  height: auto;
+  min-height: 56px;
+  padding: 10px 16px;
   border-bottom: 1px solid var(--el-border-color-lighter);
   background: var(--el-bg-color);
   box-shadow: var(--el-box-shadow-lighter);
   position: relative;
   overflow: hidden;
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
+  justify-content: center;
+  gap: 22px;
+}
+
+.headerTop {
   display: flex;
   align-items: center;
   justify-content: space-between;
@@ -1892,6 +1809,46 @@ async function loadArtifact(id: string) {
   gap: 8px;
   flex-wrap: wrap;
   justify-content: flex-end;
+}
+
+.selectorBar {
+  padding: 10px 16px;
+  border-bottom: 1px solid var(--el-border-color-lighter);
+  background: color-mix(in srgb, var(--el-fill-color-lighter) 65%, var(--el-bg-color));
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  box-shadow: var(--el-box-shadow-lighter);
+  position: relative;
+}
+
+.selectorBarInHeader {
+  padding: 0;
+  border-bottom: none;
+  background: transparent;
+  box-shadow: none;
+}
+
+.selectorTitle {
+  font-size: 14px;
+  font-weight: 700;
+  opacity: 0.95;
+  white-space: nowrap;
+  padding-left: 10px;
+  position: relative;
+}
+
+.selectorTitle::before {
+  content: '';
+  position: absolute;
+  left: 0;
+  top: 50%;
+  transform: translateY(-50%);
+  width: 3px;
+  height: 14px;
+  border-radius: 2px;
+  background: var(--el-color-primary);
 }
 
 .title {

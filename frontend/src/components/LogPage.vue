@@ -69,7 +69,7 @@ const entries: LogEntry[] = [
             content: `{
   "version": "1.0.0",
   "kind": "diagram_spec",
-  "graphType": "flow|architecture|dataflow",
+  "graphType": "flow|sequence|state|architecture|metrics",
   "templateId": "classic.flow.v1",
   "rendererHint": "mermaid|drawio",
   "nodes": [
