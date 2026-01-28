@@ -4,6 +4,8 @@ import * as echarts from 'echarts'
 import { Loading } from '@element-plus/icons-vue'
 import { jsPDF } from 'jspdf'
 
+import LogPage from './components/LogPage.vue'
+
 import {
   dbPing,
   generateDiagram,
@@ -28,6 +30,8 @@ import { renderMermaid } from './lib/mermaid'
 import drawioBlankXml from './assets/drawio-blank.drawio?raw'
 
 const activeTab = ref<'diagram' | 'drawio' | 'integration' | 'settlement' | 'artifacts'>('diagram')
+
+const logsOpen = ref(false)
 
 const STORAGE_KEYS = {
   statusPanelCollapsed: 'pdc:statusPanelCollapsed',
@@ -585,6 +589,45 @@ const featureMatrix = computed(() => {
 type StepItem = { title: string; description?: string }
 
 const llmSteps = computed<StepItem[]>(() => {
+  if (activeTab.value === 'drawio') {
+    return [
+      { title: '前端点击生成' },
+      { title: '后端 API' },
+      { title: 'LLM' },
+      { title: '结构化 draw.io XML' },
+      { title: '载入 draw.io 编辑器' },
+      { title: '可编辑 & 导出产物' },
+    ]
+  }
+
+  if (activeTab.value === 'integration') {
+    return [
+      { title: '前端点击生成' },
+      { title: '后端 API' },
+      { title: 'LLM' },
+      { title: '结构化输出（Markdown/方案）' },
+      { title: '前端展示' },
+    ]
+  }
+
+  if (activeTab.value === 'settlement') {
+    return [
+      { title: '前端点击生成' },
+      { title: '后端 API' },
+      { title: '结算计算/聚合' },
+      { title: '前端 ECharts 渲染' },
+    ]
+  }
+
+  if (activeTab.value === 'artifacts') {
+    return [
+      { title: '前端加载' },
+      { title: '后端 API' },
+      { title: '展示产物元数据' },
+    ]
+  }
+
+  // Default: Mermaid auto diagram pipeline
   return [
     { title: '前端点击生成' },
     { title: '后端 API' },
@@ -597,7 +640,11 @@ const llmSteps = computed<StepItem[]>(() => {
 
 // Active step for the pipeline UI (Element Plus Steps)
 // We use a 1-based index here and set it to (steps.length + 1) when finished.
-const llmStepActive = ref(7)
+const llmStepActive = ref(llmSteps.value.length + 1)
+
+watch(activeTab, () => {
+  llmStepActive.value = llmSteps.value.length + 1
+})
 
 function setLlmStepActive(step: number) {
   const total = llmSteps.value.length + 1
@@ -1077,7 +1124,7 @@ async function loadArtifact(id: string) {
       <el-header class="header">
         <div class="brand">
           <div class="title">产品智绘官（Product Diagram Copilot）</div>
-          <div class="subtitle">文本 → Diagram Spec → Mermaid / 结算指标可视化</div>
+          <div class="subtitle">文本 → Diagram Spec/XML → Mermaid / drawio / 结算指标可视化</div>
         </div>
 
         <div class="headerRight">
@@ -1090,6 +1137,9 @@ async function loadArtifact(id: string) {
           </el-tag>
           <el-tag size="small" type="info">Model: {{ llm?.model || '-' }}</el-tag>
           <el-tag size="small" type="info">Latency: {{ llm?.latency_ms ?? '-' }}ms</el-tag>
+          <el-button size="small" @click="() => { logsOpen = !logsOpen }">
+            {{ logsOpen ? '收起日志' : '日志' }}
+          </el-button>
           <el-button size="small" :loading="llmLoading || dbLoading" @click="() => { refreshDb(); refreshLlm(); }">
             刷新
           </el-button>
@@ -1097,6 +1147,16 @@ async function loadArtifact(id: string) {
       </el-header>
 
       <el-main class="main">
+        <el-card v-if="logsOpen" class="mb" shadow="never">
+          <template #header>
+            <div style="display: flex; align-items: center; justify-content: space-between; gap: 12px">
+              <span>日志</span>
+              <el-button size="small" @click="() => { logsOpen = false }">关闭</el-button>
+            </div>
+          </template>
+          <LogPage />
+        </el-card>
+
         <el-card class="mb panel" shadow="never">
           <template #header>
             <div style="display: flex; align-items: center; justify-content: space-between">
@@ -1107,14 +1167,6 @@ async function loadArtifact(id: string) {
                   @click="() => { statusPanelCollapsed = !statusPanelCollapsed }"
                 >
                   {{ statusPanelCollapsed ? '展开' : '折叠' }}
-                </el-button>
-                <el-button
-                  size="small"
-                  :loading="llmLoading || dbLoading"
-                  :disabled="statusPanelCollapsed"
-                  @click="() => { refreshDb(); refreshLlm(); }"
-                >
-                  刷新
                 </el-button>
               </div>
             </div>
@@ -1395,6 +1447,7 @@ async function loadArtifact(id: string) {
               referrerpolicy="no-referrer"
             />
           </el-tab-pane>
+
 
           <el-tab-pane label="接入方案" name="integration">
             <el-row :gutter="16">
